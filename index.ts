@@ -146,6 +146,7 @@ app.post("/payments/complete", async (req, res) => {
         const newPremiumUntil = new Date(currentPremiumUntil.getTime() + 30 * 24 * 60 * 60 * 1000);
 
         await userRef.update({
+            premium: true,
             premiumUntil: newPremiumUntil.toISOString(),
             lastPaymentId: paymentId // ✅ Save last paymentId
         });
