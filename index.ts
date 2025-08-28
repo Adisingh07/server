@@ -4,12 +4,12 @@ import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
-import { adminDb } from './src/firebase-admin'; // Firestore admin instance
+import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
 import type { User, Conversation, Message, MessageRequest } from './src/types';
 import dotenv from 'dotenv';
 
-
 dotenv.config();
+initializeFirebaseAdmin();
 
 const app = express();
 const server = http.createServer(app);
@@ -77,6 +77,7 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
         return null;
     }
 }
+
 
 
 // --- PI PREMIUM & USER API ---
@@ -159,6 +160,7 @@ app.post("/payments/complete", async (req, res) => {
         res.status(500).send({ error: (e as Error).message });
     }
 });
+
 
 
 // --- CONVERSATION & MESSAGE API Endpoints ---
@@ -259,7 +261,7 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
         const newConversation: Omit<Conversation, '_id'> = {
             participantIds,
             participants: { [fromId]: user1, [toId]: user2 },
-            lastMessage: null, // The first message will be added right after
+            lastMessage: null,
             createdAt: new Date(),
             updatedAt: new Date(),
         };
@@ -285,10 +287,8 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
             { $set: { lastMessage: { _id: msgResult.insertedId.toHexString(), ...newMessage }, updatedAt: new Date() }}
         );
         
-        // Finally, delete the request
         await db.collection('messageRequests').deleteOne({ _id: new ObjectId(requestId) });
 
-        // Notify both users that a new conversation has started
         const finalConversation = await db.collection('conversations').findOne({ _id: convoResult.insertedId });
         participantIds.forEach(id => {
             io.to(id).emit('newConversation', finalConversation);
@@ -308,7 +308,7 @@ io.on('connection', (socket) => {
   const userId = socket.handshake.query.userId as string;
   if (userId) {
       console.log(`User connected: ${userId}, socket: ${socket.id}`);
-      socket.join(userId); // User joins a room for their own notifications
+      socket.join(userId);
   }
 
   socket.on('joinRoom', (conversationId) => {
@@ -329,7 +329,6 @@ io.on('connection', (socket) => {
         return callback({ success: false, error: "Missing sender or receiver ID." });
       }
 
-      // --- SCENARIO 1: Sending message in an EXISTING conversation ---
       if (conversationId) {
          if (!content) return callback({ success: false, error: "Message content is empty." });
         const newMessage: Omit<Message, '_id'> = {
@@ -355,7 +354,6 @@ io.on('connection', (socket) => {
         return callback({ success: true });
       }
 
-      // --- SCENARIO 2: Sending a NEW message (check for existing convo or request) ---
       if (!receiverId) return callback({ success: false, error: "Receiver ID is required for new messages." });
       
       const participantIds = [senderId, receiverId].sort();
@@ -363,12 +361,10 @@ io.on('connection', (socket) => {
            participantIds: { $all: participantIds }
       });
       
-      // If conversation already exists, just return its ID.
       if (conversation) {
          return callback({ success: true, conversationId: conversation._id.toHexString() });
       }
       
-      // Check if a request already exists (either way)
       let request = await db.collection('messageRequests').findOne({
           $or: [
               { fromId: senderId, toId: receiverId },
@@ -380,12 +376,10 @@ io.on('connection', (socket) => {
           return callback({ success: true, isRequest: true, message: "A message request already exists." });
       }
       
-      // If no message content, it was just a check. Don't create a request.
       if (!content) {
           return callback({ success: true, isRequest: false });
       }
 
-      // Create a new Message Request
       const fromUser = await getUserFromFirestore(senderId);
       if (!fromUser) return callback({ success: false, error: 'Sender not found.' });
 
@@ -408,7 +402,6 @@ io.on('connection', (socket) => {
       
       await db.collection('messageRequests').insertOne(newRequest);
       
-      // Notify the receiver about the new request
       io.to(receiverId).emit('newMessageRequest');
 
       callback({ success: true, isRequest: true });
@@ -431,7 +424,6 @@ io.on('connection', (socket) => {
         );
 
         if (updateResult.modifiedCount > 0) {
-            // Notify the room that messages have been read
             io.to(conversationId).emit('messagesRead', { conversationId, readerId: userId });
         }
      } catch (error) {
@@ -448,17 +440,14 @@ io.on('connection', (socket) => {
             const userIds = reactions[reaction] || [];
 
             if (userIds.includes(userId)) {
-                // User is removing their reaction
                 reactions[reaction] = userIds.filter((id: string) => id !== userId);
             } else {
-                // User is adding a reaction, remove from any other reaction they might have had
                 Object.keys(reactions).forEach(key => {
                     reactions[key] = reactions[key].filter((id: string) => id !== userId);
                 });
                 reactions[reaction] = [...(reactions[reaction] || []), userId];
             }
             
-            // Clean up empty reaction arrays
             Object.keys(reactions).forEach(key => {
                 if (reactions[key].length === 0) {
                     delete reactions[key];
@@ -483,13 +472,12 @@ io.on('connection', (socket) => {
   socket.on('deleteMessage', async ({ messageId, userId }) => {
       try {
             const message = await db.collection('messages').findOne({ _id: new ObjectId(messageId) });
-            if (!message || message.senderId !== userId) return; // Only sender can delete
+            if (!message || message.senderId !== userId) return;
 
             await db.collection('messages').deleteOne({ _id: new ObjectId(messageId) });
             
             io.to(message.conversationId).emit('deleteMessage', messageId);
 
-            // If it was the last message, update the conversation's lastMessage
             const conversation = await db.collection('conversations').findOne({ _id: new ObjectId(message.conversationId) });
             if (conversation?.lastMessage?._id === messageId) {
                 const newLastMessage = await db.collection('messages')
@@ -525,5 +513,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Chat server running on port ${PORT}`);
+  console.log(`Backend server running on port ${PORT}`);
 });
