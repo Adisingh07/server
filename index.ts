@@ -5,7 +5,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
 import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
-import type { User, Conversation, Message, MessageRequest } from './src/types';
+import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification } from './src/types';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -14,8 +14,20 @@ initializeFirebaseAdmin();
 const app = express();
 const server = http.createServer(app);
 
+const allowedOrigins = [
+    "https://studio-complet2.vercel.app",
+    "https://connect-pi-roan.vercel.app",
+    "https://connectpi.in"
+];
+
 const corsOptions = {
-    origin: "*", // Your Next.js app URL
+    origin: function (origin, callback) {
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
     methods: ["GET", "POST", "DELETE"]
 };
 
@@ -29,6 +41,8 @@ app.use(express.json());
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/piconnect';
 let db: Db;
 
+const PI_API_BASE = "https://api.minepi.com";
+
 async function connectDB() {
   try {
     const client = new MongoClient(MONGO_URI);
@@ -41,6 +55,12 @@ async function connectDB() {
     await db.collection('messages').createIndex({ conversationId: 1, createdAt: -1 });
     await db.collection('messageRequests').createIndex({ toId: 1 });
     await db.collection('messageRequests').createIndex({ fromId: 1, toId: 1 }, { unique: true });
+    await db.collection('payments').createIndex({ userId: 1 });
+    await db.collection('payments').createIndex({ paymentId: 1 }, { unique: true });
+    await db.collection('donations').createIndex({ piUsername: 1 });
+    await db.collection('donations').createIndex({ paymentId: 1 }, { unique: true });
+    await db.collection('notifications').createIndex({ recipientId: 1, createdAt: -1 });
+
 
   } catch (error) {
     console.error("MongoDB connection failed:", error);
@@ -78,9 +98,50 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
     }
 }
 
+async function createNotification(notification: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
+    if (notification.recipientId === notification.actor.id) {
+        return; // Don't notify users of their own actions
+    }
+    try {
+        const newNotification = {
+            ...notification,
+            read: false,
+            createdAt: new Date(),
+        };
+        const result = await db.collection('notifications').insertOne(newNotification);
+        io.to(notification.recipientId).emit('new_notification');
+    } catch (error) {
+        console.error("Failed to create notification in MongoDB", error);
+    }
+}
 
 
-// --- PI PREMIUM & USER API ---
+// --- PI AUTH, PREMIUM & USER API ---
+
+app.post("/auth/verify", async (req, res) => {
+    const { accessToken } = req.body;
+    if (!accessToken) {
+        return res.status(400).send({ message: "Access token is required." });
+    }
+    try {
+        const piApiResponse = await fetch(`${PI_API_BASE}/v2/me`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+
+        if (!piApiResponse.ok) {
+            console.error("Pi API Error:", await piApiResponse.text());
+            throw new Error("Failed to verify access token with Pi servers.");
+        }
+
+        const piUser = await piApiResponse.json();
+        // Return the verified user object from Pi
+        res.send({ user: { uid: piUser.uid, username: piUser.username }});
+    } catch (e) {
+        console.error("Auth verification failed", e);
+        res.status(500).send({ message: (e as Error).message });
+    }
+});
+
 
 app.get("/user/:uid", async (req, res) => {
   try {
@@ -95,15 +156,64 @@ app.get("/user/:uid", async (req, res) => {
 });
 
 
+
+// 🔥 Incomplete Payment Handler
+app.post("/complete-payment", async (req, res) => {
+  try {
+    const payment = req.body; // frontend se aaya hua pending payment
+    console.log("Completing payment:", payment);
+
+    if (!payment.identifier) {
+      return res.status(400).json({ success: false, error: "Missing payment identifier" });
+    }
+
+    // 🔑 Pi API se verify / complete call
+    const verifyRes = await fetch(`${PI_API_BASE}/v2/payments/${payment.identifier}/complete`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Key ${process.env.PI_API_KEY}`, // Pi API key env me rakho
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        txid: payment.transaction?.txid || null
+      })
+    });
+
+    if (!verifyRes.ok) {
+      const errText = await verifyRes.text();
+      console.error("Pi API error:", errText);
+      return res.status(500).json({ success: false, error: "Pi API request failed" });
+    }
+
+    const verifiedPayment = await verifyRes.json();
+    console.log("Payment verified:", verifiedPayment);
+
+    // ✅ DB me save/update karo
+    await db.collection("payments").updateOne(
+      { paymentId: verifiedPayment.identifier },
+      { $set: { ...verifiedPayment, completedAt: new Date() } },
+      { upsert: true }
+    );
+
+    return res.json({ success: true, payment: verifiedPayment });
+  } catch (err) {
+    console.error("Error completing payment:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 app.post("/payments/approve", async (req, res) => {
   const { paymentId, userId } = req.body;
   console.log(`Approving payment ${paymentId} for user ${userId}`);
   try {
     // In a real app, you would verify the user making the request
     // and check that the payment is for a valid product.
-    await fetch(`https://api.minepi.com/v2/payments/${paymentId}/approve`, {
+    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
         method: "POST",
-        headers: { Authorization: `Key ${process.env.PI_API_KEY}` }
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}` 
+            },
     });
     res.send({ success: true });
   } catch (e) {
@@ -116,49 +226,144 @@ app.post("/payments/approve", async (req, res) => {
 app.post("/payments/complete", async (req, res) => {
     const { paymentId, txid, userId } = req.body;
     console.log(`Completing payment ${paymentId} (tx: ${txid}) for user ${userId}`);
-
     try {
-        const userRef = adminDb.collection('users').doc(userId);
-        const userDoc = await userRef.get();
-        const userData = userDoc.data();
-
-        // ✅ Check if payment already processed
-        if (userData?.lastPaymentId === paymentId) {
-            return res.send({
-                success: true,
-                premiumUntil: userData.premiumUntil,
-                message: "Payment already processed"
-            });
-        }
-
-        // ✅ Complete payment with Pi API
-        await fetch(`https://api.minepi.com/v2/payments/${paymentId}/complete`, {
+        // Step 1: Complete the payment with the Pi Platform
+        const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
             method: "POST",
-            headers: { Authorization: `Key ${process.env.PI_API_KEY}` },
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}` 
+            },
             body: JSON.stringify({ txid }),
         });
 
-        // ✅ Update premium date
+        if (!completeResponse.ok) {
+            const errorText = await completeResponse.text();
+            console.error("Failed to complete payment with Pi servers:", errorText);
+            throw new Error("Failed to complete payment transaction.");
+        }
+        
+        const paymentData = await completeResponse.json();
+
+        // Step 2: Grant premium access in Firestore
+        const userRef = adminDb.collection('users').doc(userId);
+        const userDoc = await userRef.get();
+        if (!userDoc.exists) {
+             throw new Error("User to grant premium to was not found.");
+        }
+        const userData = userDoc.data();
+        
         const now = new Date();
+        // If user already has premium, extend it. Otherwise, start from now.
         const currentPremiumUntil = (userData?.premiumUntil && new Date(userData.premiumUntil) > now)
             ? new Date(userData.premiumUntil)
             : now;
+        
         const newPremiumUntil = new Date(currentPremiumUntil.getTime() + 30 * 24 * 60 * 60 * 1000);
 
         await userRef.update({
             premium: true,
-            premiumUntil: newPremiumUntil.toISOString(),
-            lastPaymentId: paymentId // ✅ Save last paymentId
+            premiumUntil: newPremiumUntil.toISOString()
         });
 
-        res.send({
-            success: true,
-            premiumUntil: newPremiumUntil.toISOString(),
-            message: "Payment completed successfully"
-        });
+        // Step 3: Store the payment details (DTO) in MongoDB for records
+        const paymentDto: PaymentDto = {
+            paymentId: paymentData.identifier,
+            userId: userId,
+            username: userData?.username,
+            amount: paymentData.amount,
+            memo: paymentData.memo,
+            metadata: paymentData.metadata,
+            toAddress: paymentData.to_address,
+            createdAt: new Date(paymentData.created_at),
+        };
+        await db.collection('payments').insertOne(paymentDto);
+
+
+        res.send({ success: true, premiumUntil: newPremiumUntil.toISOString() });
     } catch (e) {
         console.error("Failed to complete payment", e);
         res.status(500).send({ error: (e as Error).message });
+    }
+});
+
+app.post("/donations/complete", async (req, res) => {
+  const { paymentId, txid } = req.body;
+  console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
+
+  try {
+    // Step 1: Call Pi API to complete donation
+    const completeResponse = await fetch(
+      `${PI_API_BASE}/v2/payments/${paymentId}/complete`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Key ${process.env.PI_API_KEY}`,
+        },
+        body: JSON.stringify({ txid }),
+      }
+    );
+
+    if (!completeResponse.ok) {
+      const errorText = await completeResponse.text();
+      console.error("❌ Failed to complete donation with Pi servers:", errorText);
+      return res.status(400).json({ success: false, error: errorText });
+    }
+
+    const paymentData = await completeResponse.json();
+
+    // Step 2: Prepare donation record safely
+    const donationDto: DonationDto = {
+      paymentId: paymentData.identifier,
+      piUsername: paymentData.from_user?.username || "anonymous",
+      amount: paymentData.amount,
+      memo: paymentData.memo,
+      createdAt: new Date(paymentData.created_at),
+    };
+
+    // Step 3: Save in DB
+    await db.collection("donations").insertOne(donationDto);
+
+    console.log(`✅ Donation of ${donationDto.amount}π from ${donationDto.piUsername} recorded.`);
+
+    // Step 4: Respond to frontend
+    return res.status(200).json({ success: true, donation: donationDto });
+
+  } catch (e) {
+    console.error("🔥 Failed to complete donation", e);
+    return res.status(500).json({ success: false, error: (e as Error).message });
+  }
+});
+
+
+// --- NOTIFICATION API ---
+app.get('/api/notifications/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const notifications = await db.collection('notifications')
+            .find({ recipientId: userId })
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .toArray();
+        res.status(200).json(notifications);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch notifications.' });
+    }
+});
+
+app.post('/api/notifications/mark-read', async (req, res) => {
+    try {
+        const { userId } = req.body;
+        if (!userId) return res.status(400).json({ error: 'User ID is required.' });
+
+        await db.collection('notifications').updateMany(
+            { recipientId: userId, read: false },
+            { $set: { read: true } }
+        );
+        res.status(200).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to mark notifications as read.' });
     }
 });
 
@@ -262,7 +467,7 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
         const newConversation: Omit<Conversation, '_id'> = {
             participantIds,
             participants: { [fromId]: user1, [toId]: user2 },
-            lastMessage: null,
+            lastMessage: null, // The first message will be added right after
             createdAt: new Date(),
             updatedAt: new Date(),
         };
@@ -288,8 +493,10 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
             { $set: { lastMessage: { _id: msgResult.insertedId.toHexString(), ...newMessage }, updatedAt: new Date() }}
         );
         
+        // Finally, delete the request
         await db.collection('messageRequests').deleteOne({ _id: new ObjectId(requestId) });
 
+        // Notify both users that a new conversation has started
         const finalConversation = await db.collection('conversations').findOne({ _id: convoResult.insertedId });
         participantIds.forEach(id => {
             io.to(id).emit('newConversation', finalConversation);
@@ -309,7 +516,7 @@ io.on('connection', (socket) => {
   const userId = socket.handshake.query.userId as string;
   if (userId) {
       console.log(`User connected: ${userId}, socket: ${socket.id}`);
-      socket.join(userId);
+      socket.join(userId); // User joins a room for their own notifications
   }
 
   socket.on('joinRoom', (conversationId) => {
@@ -330,6 +537,7 @@ io.on('connection', (socket) => {
         return callback({ success: false, error: "Missing sender or receiver ID." });
       }
 
+      // --- SCENARIO 1: Sending message in an EXISTING conversation ---
       if (conversationId) {
          if (!content) return callback({ success: false, error: "Message content is empty." });
         const newMessage: Omit<Message, '_id'> = {
@@ -355,6 +563,7 @@ io.on('connection', (socket) => {
         return callback({ success: true });
       }
 
+      // --- SCENARIO 2: Sending a NEW message (check for existing convo or request) ---
       if (!receiverId) return callback({ success: false, error: "Receiver ID is required for new messages." });
       
       const participantIds = [senderId, receiverId].sort();
@@ -362,10 +571,12 @@ io.on('connection', (socket) => {
            participantIds: { $all: participantIds }
       });
       
+      // If conversation already exists, just return its ID.
       if (conversation) {
          return callback({ success: true, conversationId: conversation._id.toHexString() });
       }
       
+      // Check if a request already exists (either way)
       let request = await db.collection('messageRequests').findOne({
           $or: [
               { fromId: senderId, toId: receiverId },
@@ -377,10 +588,12 @@ io.on('connection', (socket) => {
           return callback({ success: true, isRequest: true, message: "A message request already exists." });
       }
       
+      // If no message content, it was just a check. Don't create a request.
       if (!content) {
           return callback({ success: true, isRequest: false });
       }
 
+      // Create a new Message Request
       const fromUser = await getUserFromFirestore(senderId);
       if (!fromUser) return callback({ success: false, error: 'Sender not found.' });
 
@@ -403,7 +616,12 @@ io.on('connection', (socket) => {
       
       await db.collection('messageRequests').insertOne(newRequest);
       
-      io.to(receiverId).emit('newMessageRequest');
+      // Create a notification for the message request
+      await createNotification({
+          recipientId: receiverId,
+          actor: { id: fromUser.id, name: fromUser.name, username: fromUser.username, avatarUrl: fromUser.avatarUrl },
+          type: 'message_request'
+      });
 
       callback({ success: true, isRequest: true });
       
@@ -425,6 +643,7 @@ io.on('connection', (socket) => {
         );
 
         if (updateResult.modifiedCount > 0) {
+            // Notify the room that messages have been read
             io.to(conversationId).emit('messagesRead', { conversationId, readerId: userId });
         }
      } catch (error) {
@@ -441,14 +660,17 @@ io.on('connection', (socket) => {
             const userIds = reactions[reaction] || [];
 
             if (userIds.includes(userId)) {
+                // User is removing their reaction
                 reactions[reaction] = userIds.filter((id: string) => id !== userId);
             } else {
+                // User is adding a reaction, remove from any other reaction they might have had
                 Object.keys(reactions).forEach(key => {
                     reactions[key] = reactions[key].filter((id: string) => id !== userId);
                 });
                 reactions[reaction] = [...(reactions[reaction] || []), userId];
             }
             
+            // Clean up empty reaction arrays
             Object.keys(reactions).forEach(key => {
                 if (reactions[key].length === 0) {
                     delete reactions[key];
@@ -473,12 +695,13 @@ io.on('connection', (socket) => {
   socket.on('deleteMessage', async ({ messageId, userId }) => {
       try {
             const message = await db.collection('messages').findOne({ _id: new ObjectId(messageId) });
-            if (!message || message.senderId !== userId) return;
+            if (!message || message.senderId !== userId) return; // Only sender can delete
 
             await db.collection('messages').deleteOne({ _id: new ObjectId(messageId) });
             
             io.to(message.conversationId).emit('deleteMessage', messageId);
 
+            // If it was the last message, update the conversation's lastMessage
             const conversation = await db.collection('conversations').findOne({ _id: new ObjectId(message.conversationId) });
             if (conversation?.lastMessage?._id === messageId) {
                 const newLastMessage = await db.collection('messages')
@@ -514,5 +737,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Backend server running on port ${PORT}`);
+  console.log(`Chat server running on port ${PORT}`);
 });
