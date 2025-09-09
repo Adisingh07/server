@@ -1,19 +1,23 @@
+
+
 export type User = {
   id: string;
   username: string;
   name: string;
-  password?: string;
+  password?: string; // It's recommended to not store passwords in plain text
   avatarUrl?: string;
   bio?: string;
   links: string[];
-  followers: string[];
-  following: string[];
+  followers: string[]; // Changed to array of user IDs
+  following: string[]; // Changed to array of user IDs
   createdAt?: string;
-  bookmarks?: string[];
-  pinnedPosts?: string[];
+  bookmarks?: string[]; // Array of Post IDs
+  pinnedPosts?: string[]; // Array of Post IDs
   premium?: boolean;
   premiumUntil?: string; // ISO Date string for when premium expires
   premiumDaysLeft?: number;
+  blockedUsers?: string[]; // Array of user IDs
+  authority?: 'admin' | 'gov' | 'moderator' | 'user'; // User roles
 };
 
 export type Post = {
@@ -24,6 +28,7 @@ export type Post = {
     username: string;
     avatarUrl?: string;
     premium?: boolean;
+    authority?: 'admin' | 'gov' | 'moderator' | 'user';
   };
   content: string;
   likes: string[]; // User IDs of those who liked
@@ -41,6 +46,7 @@ export type Comment = {
     username: string;
     avatarUrl?: string;
     premium?: boolean;
+    authority?: 'admin' | 'gov' | 'moderator' | 'user';
   };
   content: string;
   likes: string[]; // User IDs
@@ -52,7 +58,8 @@ export type Comment = {
 export type Report = {
   reporterId: string;
   timestamp: string;
-  reason?: string;
+  reason: string;
+  details?: string;
 };
 
 export type ReportedPost = Post & {
@@ -60,11 +67,16 @@ export type ReportedPost = Post & {
   reporters: string[]; // Simple array of reporter UIDs for quick access
 };
 
+export type ReportedUser = User & {
+  reports: Report[];
+  reporters: string[];
+};
+
 
 export type Notification = {
-    id: string;
+    _id: string;
     recipientId: string;
-    type: 'like' | 'comment' | 'follow';
+    type: 'like' | 'comment' | 'follow' | 'message_request';
     actor: {
         id: string;
         name: string;
@@ -76,7 +88,7 @@ export type Notification = {
         content: string;
     };
     read: boolean;
-    createdAt: string;
+    createdAt: Date;
 }
 
 export type Conversation = {
@@ -114,5 +126,26 @@ export type MessageRequest = {
         content: string;
         createdAt: Date;
     };
+    createdAt: Date;
+}
+
+// Data Transfer Object for storing premium payment details
+export type PaymentDto = {
+    paymentId: string;
+    userId: string;
+    username: string;
+    amount: number;
+    memo: string;
+    metadata: object;
+    toAddress: string; // The app's receiving address
+    createdAt: Date;
+}
+
+// Data Transfer Object for storing donation details
+export type DonationDto = {
+    paymentId: string;
+    piUsername: string; // The Pi username of the donor
+    amount: number;
+    memo: string;
     createdAt: Date;
 }
