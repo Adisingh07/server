@@ -17,6 +17,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
     "https://studio-complet2.vercel.app",
     "https://connect-pi-roan.vercel.app",
+    "https://api.minepi.com",
     "https://connectpi.in"
 ];
 
