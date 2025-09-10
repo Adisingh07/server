@@ -16,6 +16,7 @@ const server = http.createServer(app);
 
 const allowedOrigins = [
     "https://studio-complet2.vercel.app",
+    "https://server-bt35.onrender.com",
     "https://connect-pi-roan.vercel.app",
     "https://api.minepi.com",
     "https://connectpi.in"
@@ -93,18 +94,19 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
     }
 }
 
-async function createNotification(notification: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
-    if (notification.recipientId === notification.actor.id) {
+async function createNotificationOnServer(notificationData: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
+    if (notificationData.recipientId === notificationData.actor.id) {
         return; // Don't notify users of their own actions
     }
     try {
-        const newNotification = {
-            ...notification,
-            read: false,
+        const fullNotification = {
+            ...notificationData,
             createdAt: new Date(),
+            read: false,
         };
-        const result = await db.collection('notifications').insertOne(newNotification);
-        io.to(notification.recipientId).emit('new_notification');
+        const result = await db.collection('notifications').insertOne(fullNotification);
+        io.to(notificationData.recipientId).emit('new_notification');
+        console.log(`Notification created for ${notificationData.recipientId}`);
     } catch (error) {
         console.error("Failed to create notification in MongoDB", error);
     }
@@ -282,6 +284,30 @@ app.post("/payments/complete", async (req, res) => {
     }
 });
 
+
+
+app.post("/donate/approve", async (req, res) => {
+  const { paymentId } = req.body;
+  console.log(`Approving payment ${paymentId}`);
+  if (!paymentId) {
+      return res.status(400).send({ error: "paymentId is required" });
+  }
+  try {
+    // This endpoint is now generic and doesn't depend on user context.
+    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
+        method: "POST",
+        headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}` 
+            },
+        });
+    res.send({ success: true });
+  } catch (e) {
+    console.error("Failed to approve payment", e);
+    res.status(500).send({ error: (e as Error).message });
+  }
+});
+
 app.post("/donations/complete", async (req, res) => {
   const { paymentId, txid } = req.body;
   console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
@@ -333,6 +359,24 @@ app.post("/donations/complete", async (req, res) => {
 
 
 // --- NOTIFICATION API ---
+
+
+app.post('/api/notifications/create', async (req, res) => {
+    try {
+        const notification = req.body;
+        // Basic validation
+        if (!notification.recipientId || !notification.actor || !notification.type) {
+            return res.status(400).json({ error: 'Missing required notification fields.' });
+        }
+        await createNotificationOnServer(notification);
+        res.status(201).json({ success: true });
+    } catch (error) {
+        console.error('Error creating notification via API:', error);
+        res.status(500).json({ error: 'Failed to create notification.' });
+    }
+});
+
+
 app.get('/api/notifications/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -361,8 +405,6 @@ app.post('/api/notifications/mark-read', async (req, res) => {
         res.status(500).json({ error: 'Failed to mark notifications as read.' });
     }
 });
-
-
 
 // --- CONVERSATION & MESSAGE API Endpoints ---
 
@@ -612,7 +654,7 @@ io.on('connection', (socket) => {
       await db.collection('messageRequests').insertOne(newRequest);
       
       // Create a notification for the message request
-      await createNotification({
+      await createNotificationOnServer({
           recipientId: receiverId,
           actor: { id: fromUser.id, name: fromUser.name, username: fromUser.username, avatarUrl: fromUser.avatarUrl },
           type: 'message_request'
@@ -734,3 +776,4 @@ const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Chat server running on port ${PORT}`);
 });
+
