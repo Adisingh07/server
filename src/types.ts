@@ -165,3 +165,16 @@ export type User = {
     createdAt: string;
     updatedAt: string;
   }
+
+  export type Transaction = {
+    id: string;
+    userId: string;
+    username: string;
+    type: 'deposit' | 'withdrawal';
+    status: 'completed' | 'pending' | 'cancelled';
+    amount: number;
+    reason?: string;
+    createdAt: string;
+    updatedAt?: string;
+    address?: string;
+  }
