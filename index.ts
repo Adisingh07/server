@@ -5,7 +5,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
 import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
-import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast } from './src/types';
+import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast, Transaction } from './src/types';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -445,6 +445,23 @@ app.post('/api/notifications/mark-read', async (req, res) => {
         res.status(200).json({ success: true });
     } catch (error) {
         res.status(500).json({ error: 'Failed to mark notifications as read.' });
+    }
+});
+
+app.get('/api/transactions/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const snapshot = await adminDb.collection('transactions')
+            .where('userId', '==', userId)
+            .orderBy('createdAt', 'desc')
+            .limit(20)
+            .get();
+        
+        const history = snapshot.docs.map(doc => doc.data() as Transaction);
+        res.status(200).json(history);
+    } catch (error) {
+        console.error("Error fetching transaction history:", error);
+        res.status(500).json({ error: 'Failed to fetch transaction history.' });
     }
 });
 
