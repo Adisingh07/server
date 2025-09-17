@@ -5,7 +5,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
 import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
-import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification } from './src/types';
+import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast } from './src/types';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -111,6 +111,48 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
         console.error("Failed to create notification in MongoDB", error);
     }
 }
+
+
+// --- BROADCAST API ---
+app.get('/api/broadcast/active', async (req, res) => {
+    try {
+        const snapshot = await adminDb.collection('broadcasts')
+            .where('isActive', '==', true)
+            .limit(1)
+            .get();
+        
+        if (snapshot.empty) {
+            return res.status(404).json({ message: 'No active broadcast found.' });
+        }
+
+        const broadcast = snapshot.docs[0].data() as Broadcast;
+        res.status(200).json(broadcast);
+
+    } catch (error) {
+        console.error("Error fetching active broadcast:", error);
+        res.status(500).json({ error: 'Failed to fetch active broadcast.' });
+    }
+});
+
+// --- GET ALL BROADCASTS for user display ---
+app.get('/api/broadcasts', async (req, res) => {
+    try {
+        const snapshot = await adminDb.collection('broadcasts')
+            .orderBy('createdAt', 'desc')
+            .get();
+        
+        if (snapshot.empty) {
+            return res.status(200).json([]);
+        }
+
+        const broadcasts = snapshot.docs.map(doc => doc.data() as Broadcast);
+        res.status(200).json(broadcasts);
+
+    } catch (error) {
+        console.error("Error fetching all broadcasts:", error);
+        res.status(500).json({ error: 'Failed to fetch broadcasts.' });
+    }
+});
 
 
 // --- PI AUTH, PREMIUM & USER API ---
@@ -568,7 +610,7 @@ io.on('connection', (socket) => {
 
   socket.on('sendMessage', async (messageData, callback) => {
     try {
-      const { conversationId, senderId, receiverId, content } = messageData;
+      const { conversationId, senderId, receiverId, content, mediaUrl, mediaType } = messageData;
 
       if (!senderId || (!conversationId && !receiverId)) {
         return callback({ success: false, error: "Missing sender or receiver ID." });
@@ -576,9 +618,9 @@ io.on('connection', (socket) => {
 
       // --- SCENARIO 1: Sending message in an EXISTING conversation ---
       if (conversationId) {
-         if (!content) return callback({ success: false, error: "Message content is empty." });
+         if (!content && !mediaUrl) return callback({ success: false, error: "Message content or media is empty." });
         const newMessage: Omit<Message, '_id'> = {
-          conversationId, senderId, content,
+          conversationId, senderId, content, mediaUrl, mediaType,
           createdAt: new Date(), readBy: [senderId],
           reactions: {}, deletedFor: [],
         };
@@ -626,7 +668,7 @@ io.on('connection', (socket) => {
       }
       
       // If no message content, it was just a check. Don't create a request.
-      if (!content) {
+      if (!content && !mediaUrl) {
           return callback({ success: true, isRequest: false });
       }
 
@@ -776,4 +818,3 @@ const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Chat server running on port ${PORT}`);
 });
-
