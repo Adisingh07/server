@@ -170,11 +170,17 @@ export type User = {
     id: string;
     userId: string;
     username: string;
-    type: 'deposit' | 'withdrawal';
+    type: 'deposit' | 'withdrawal' | 'tip_sent' | 'tip_received';
     status: 'completed' | 'pending' | 'cancelled';
     amount: number;
     reason?: string;
     createdAt: string;
     updatedAt?: string;
     address?: string;
-  }
+    metadata?: {
+      postId?: string;
+      fromUserId?: string;
+      toUserId?: string;
+      tipMessage?: string;
+    };
+  };
