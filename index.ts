@@ -17,6 +17,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
     "https://studio-complet2.vercel.app",
     "https://server-bt35.onrender.com",
+    "https://6000-firebase-studio-1755769384224.cluster-ikxjzjhlifcwuroomfkjrx437g.cloudworkstations.dev",
     "https://connect-pi-roan.vercel.app",
     "https://api.minepi.com",
     "https://connectpi.in"
@@ -65,6 +66,8 @@ async function connectDB() {
 }
 
 connectDB();
+
+
 
 
 async function getUserFromFirestore(userId: string): Promise<User | null> {
