@@ -237,6 +237,7 @@ app.post("/auth/verify", async (req, res) => {
 });
 
 
+
 app.get("/user/:uid", async (req, res) => {
   try {
     const user = await getUserFromFirestore(req.params.uid);
@@ -249,27 +250,69 @@ app.get("/user/:uid", async (req, res) => {
   }
 });
 
-// --- Generic payment approval endpoint ---
-app.post("/payments/approve", async (req, res) => {
-  const { paymentId, type } = req.body;
-  if (!paymentId) {
-    return res.status(400).json({ success: false, error: "Missing paymentId" });
-  }
-  
-  console.log(`Approving payment ${paymentId} for type: ${type || 'generic'}`);
 
+// 🔥 Incomplete Payment Handler
+app.post("/complete-payment", async (req, res) => {
   try {
+    const payment = req.body; // frontend se aaya hua pending payment
+    console.log("Completing payment:", payment);
+
+    if (!payment.identifier) {
+      return res.status(400).json({ success: false, error: "Missing payment identifier" });
+    }
+
+    // 🔑 Pi API se verify / complete call
+    const verifyRes = await fetch(`${PI_API_BASE}/v2/payments/${payment.identifier}/complete`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Key ${process.env.PI_API_KEY}`, // Pi API key env me rakho
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        txid: payment.transaction?.txid || null
+      })
+    });
+
+    if (!verifyRes.ok) {
+      const errText = await verifyRes.text();
+      console.error("Pi API error:", errText);
+      return res.status(500).json({ success: false, error: "Pi API request failed" });
+    }
+
+    const verifiedPayment = await verifyRes.json();
+    console.log("Payment verified:", verifiedPayment);
+
+    // ✅ DB me save/update karo
+    await db.collection("payments").updateOne(
+      { paymentId: verifiedPayment.identifier },
+      { $set: { ...verifiedPayment, completedAt: new Date() } },
+      { upsert: true }
+    );
+
+    return res.json({ success: true, payment: verifiedPayment });
+  } catch (err) {
+    console.error("Error completing payment:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+app.post("/payments/approve", async (req, res) => {
+  const { paymentId, userId } = req.body;
+  console.log(`Approving payment ${paymentId} for user ${userId}`);
+  try {
+    // In a real app, you would verify the user making the request
+    // and check that the payment is for a valid product.
     await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
         method: "POST",
-        headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Key ${process.env.PI_API_KEY}` 
-        },
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}` 
+            },
     });
-    res.json({ success: true });
+    res.send({ success: true });
   } catch (e) {
-    console.error(`Failed to approve payment ${paymentId}:`, e);
-    res.status(500).json({ success: false, error: (e as Error).message });
+    console.error("Failed to approve payment", e);
+    res.status(500).send({ error: (e as Error).message });
   }
 });
 
@@ -340,6 +383,28 @@ app.post("/payments/complete", async (req, res) => {
 
 
 
+app.post("/donate/approve", async (req, res) => {
+  const { paymentId } = req.body;
+  console.log(`Approving payment ${paymentId}`);
+  if (!paymentId) {
+      return res.status(400).send({ error: "paymentId is required" });
+  }
+  try {
+    // This endpoint is now generic and doesn't depend on user context.
+    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
+        method: "POST",
+        headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}` 
+            },
+        });
+    res.send({ success: true });
+  } catch (e) {
+    console.error("Failed to approve payment", e);
+    res.status(500).send({ error: (e as Error).message });
+  }
+});
+
 app.post("/donations/complete", async (req, res) => {
   const { paymentId, txid } = req.body;
   console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
@@ -388,6 +453,10 @@ app.post("/donations/complete", async (req, res) => {
     return res.status(500).json({ success: false, error: (e as Error).message });
   }
 });
+
+
+
+
 
 
 // --- NEW DEPOSIT ENDPOINTS ---
