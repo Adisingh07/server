@@ -5,8 +5,9 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
 import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
-import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast, Transaction } from './src/types';
+import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast, Transaction, Deposit } from './src/types';
 import dotenv from 'dotenv';
+import { FieldValue } from 'firebase-admin/firestore';
 
 dotenv.config();
 initializeFirebaseAdmin();
@@ -22,6 +23,8 @@ const allowedOrigins = [
     "https://api.minepi.com",
     "https://connectpi.in"
 ];
+
+
 
 const corsOptions = {
     origin: allowedOrigins,
@@ -57,6 +60,7 @@ async function connectDB() {
     await db.collection('donations').createIndex({ piUsername: 1 });
     await db.collection('donations').createIndex({ paymentId: 1 }, { unique: true });
     await db.collection('notifications').createIndex({ recipientId: 1, createdAt: -1 });
+    await db.collection('deposits').createIndex({ userId: 1 });
 
 
   } catch (error) {
@@ -68,6 +72,10 @@ async function connectDB() {
 connectDB();
 
 
+app.get("/health", (req, res) => {
+    res.status(200).send("ok");
+  });
+  
 
 
 async function getUserFromFirestore(userId: string): Promise<User | null> {
@@ -97,6 +105,39 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
     }
 }
 
+async function sendPushNotification(userId: string, title: string, body: string, url: string) {
+    try {
+        const subscriptionsSnapshot = await adminDb.collection('pushSubscriptions').where('userId', '==', userId).get();
+        if (subscriptionsSnapshot.empty) {
+            return;
+        }
+
+        const tokens = subscriptionsSnapshot.docs.map(doc => doc.data().token);
+        
+        const message = {
+            notification: { title, body },
+            webpush: {
+                notification: {
+                    icon: '/apple-touch-icon.png',
+                    body: body,
+                },
+                fcm_options: {
+                    link: url,
+                },
+            },
+            tokens: tokens,
+        };
+        
+        const messaging = (await import('firebase-admin/messaging')).getMessaging;
+
+        await messaging().sendEachForMulticast(message);
+        console.log(`Push notification sent to ${userId}`);
+
+    } catch (error) {
+        console.error(`Failed to send push notification to ${userId}:`, error);
+    }
+}
+
 async function createNotificationOnServer(notificationData: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
     if (notificationData.recipientId === notificationData.actor.id) {
         return; // Don't notify users of their own actions
@@ -107,9 +148,20 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
             createdAt: new Date(),
             read: false,
         };
-        const result = await db.collection('notifications').insertOne(fullNotification);
+        await db.collection('notifications').insertOne(fullNotification);
         io.to(notificationData.recipientId).emit('new_notification');
         console.log(`Notification created for ${notificationData.recipientId}`);
+
+         // Trigger push notification for message requests
+        if(notificationData.type === 'message_request') {
+             await sendPushNotification(
+                notificationData.recipientId,
+                'New Message Request',
+                `You have a new message request from ${notificationData.actor.name}.`,
+                `${process.env.NEXT_PUBLIC_BASE_URL}/messages/requests`
+            );
+        }
+
     } catch (error) {
         console.error("Failed to create notification in MongoDB", error);
     }
@@ -197,70 +249,27 @@ app.get("/user/:uid", async (req, res) => {
   }
 });
 
-
-
-// 🔥 Incomplete Payment Handler
-app.post("/complete-payment", async (req, res) => {
-  try {
-    const payment = req.body; // frontend se aaya hua pending payment
-    console.log("Completing payment:", payment);
-
-    if (!payment.identifier) {
-      return res.status(400).json({ success: false, error: "Missing payment identifier" });
-    }
-
-    // 🔑 Pi API se verify / complete call
-    const verifyRes = await fetch(`${PI_API_BASE}/v2/payments/${payment.identifier}/complete`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Key ${process.env.PI_API_KEY}`, // Pi API key env me rakho
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        txid: payment.transaction?.txid || null
-      })
-    });
-
-    if (!verifyRes.ok) {
-      const errText = await verifyRes.text();
-      console.error("Pi API error:", errText);
-      return res.status(500).json({ success: false, error: "Pi API request failed" });
-    }
-
-    const verifiedPayment = await verifyRes.json();
-    console.log("Payment verified:", verifiedPayment);
-
-    // ✅ DB me save/update karo
-    await db.collection("payments").updateOne(
-      { paymentId: verifiedPayment.identifier },
-      { $set: { ...verifiedPayment, completedAt: new Date() } },
-      { upsert: true }
-    );
-
-    return res.json({ success: true, payment: verifiedPayment });
-  } catch (err) {
-    console.error("Error completing payment:", err);
-    return res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
-
+// --- Generic payment approval endpoint ---
 app.post("/payments/approve", async (req, res) => {
-  const { paymentId, userId } = req.body;
-  console.log(`Approving payment ${paymentId} for user ${userId}`);
+  const { paymentId, type } = req.body;
+  if (!paymentId) {
+    return res.status(400).json({ success: false, error: "Missing paymentId" });
+  }
+  
+  console.log(`Approving payment ${paymentId} for type: ${type || 'generic'}`);
+
   try {
-    // In a real app, you would verify the user making the request
-    // and check that the payment is for a valid product.
     await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
         method: "POST",
-            headers: { 
-                'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}` 
-            },
+        headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Key ${process.env.PI_API_KEY}` 
+        },
     });
-    res.send({ success: true });
+    res.json({ success: true });
   } catch (e) {
-    console.error("Failed to approve payment", e);
-    res.status(500).send({ error: (e as Error).message });
+    console.error(`Failed to approve payment ${paymentId}:`, e);
+    res.status(500).json({ success: false, error: (e as Error).message });
   }
 });
 
@@ -331,28 +340,6 @@ app.post("/payments/complete", async (req, res) => {
 
 
 
-app.post("/donate/approve", async (req, res) => {
-  const { paymentId } = req.body;
-  console.log(`Approving payment ${paymentId}`);
-  if (!paymentId) {
-      return res.status(400).send({ error: "paymentId is required" });
-  }
-  try {
-    // This endpoint is now generic and doesn't depend on user context.
-    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
-        method: "POST",
-        headers: { 
-                'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}` 
-            },
-        });
-    res.send({ success: true });
-  } catch (e) {
-    console.error("Failed to approve payment", e);
-    res.status(500).send({ error: (e as Error).message });
-  }
-});
-
 app.post("/donations/complete", async (req, res) => {
   const { paymentId, txid } = req.body;
   console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
@@ -400,6 +387,110 @@ app.post("/donations/complete", async (req, res) => {
     console.error("🔥 Failed to complete donation", e);
     return res.status(500).json({ success: false, error: (e as Error).message });
   }
+});
+
+
+// --- NEW DEPOSIT ENDPOINTS ---
+app.post("/payments/approve-deposit", async (req, res) => {
+    const { paymentId } = req.body;
+    if (!paymentId) {
+        return res.status(400).json({ success: false, error: "Missing paymentId" });
+    }
+    console.log(`Approving deposit payment ${paymentId}`);
+    try {
+        await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
+            method: "POST",
+            headers: { 'Authorization': `Key ${process.env.PI_API_KEY}` },
+        });
+        res.json({ success: true });
+    } catch (e) {
+        console.error(`Failed to approve deposit payment ${paymentId}:`, e);
+        res.status(500).json({ success: false, error: (e as Error).message });
+    }
+});
+
+app.post("/payments/complete-deposit", async (req, res) => {
+    const { paymentId, txid, userId } = req.body;
+    if (!paymentId || !txid || !userId) {
+        return res.status(400).json({ success: false, error: "Missing required fields." });
+    }
+
+    console.log(`Completing deposit ${paymentId} for user ${userId}`);
+
+    try {
+        const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
+            method: "POST",
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}`
+            },
+            body: JSON.stringify({ txid }),
+        });
+
+        if (!completeResponse.ok) {
+            const errorText = await completeResponse.text();
+            console.error(`Failed to complete deposit with Pi servers:`, errorText);
+            throw new Error(`Pi API Error: ${errorText}`);
+        }
+        
+        const paymentData = await completeResponse.json();
+        const amount = paymentData.amount;
+
+        const walletRef = adminDb.collection('wallets').doc(userId);
+        const userDoc = await adminDb.collection('users').doc(userId).get();
+        if (!userDoc.exists) throw new Error(`User ${userId} not found.`);
+        const username = userDoc.data()?.username;
+
+        const newBalance = await adminDb.runTransaction(async (transaction) => {
+            const walletDoc = await transaction.get(walletRef);
+            
+            // Atomically increment the balance
+            transaction.set(walletRef, { 
+                balance: FieldValue.increment(amount), 
+                username: username 
+            }, { merge: true });
+
+            // To return the new balance, we must calculate it.
+            const currentBalance = walletDoc.exists ? walletDoc.data()?.balance : 0;
+            return currentBalance + amount;
+        });
+        
+        const depositRecord: Deposit = {
+            paymentId: paymentData.identifier,
+            userId,
+            username,
+            amount,
+            txid,
+            createdAt: new Date(paymentData.created_at),
+        };
+        await db.collection('deposits').insertOne(depositRecord);
+        
+        // Record this deposit in the main transactions collection as well for a unified history
+        const transactionRecord: Transaction = {
+            id: adminDb.collection('transactions').doc().id,
+            userId,
+            username,
+            type: 'deposit',
+            status: 'completed',
+            amount: amount,
+            reason: 'Pi deposit',
+            createdAt: new Date(paymentData.created_at).toISOString(),
+        };
+        await adminDb.collection('transactions').add(transactionRecord);
+        
+        await createNotificationOnServer({
+            recipientId: userId,
+            type: 'fund_deposit',
+            actor: { id: 'system', name: 'Connect Pi', username: 'system' },
+            metadata: { amount },
+        });
+
+        res.status(200).json({ success: true, newBalance });
+
+    } catch (e: any) {
+        console.error("Failed to complete deposit:", e);
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 
@@ -476,7 +567,17 @@ app.get('/api/conversations/:userId', async (req, res) => {
         const conversations = await db.collection('conversations').find({
             participantIds: userId
         }).sort({ updatedAt: -1 }).toArray();
-        res.status(200).json(conversations);
+
+        // For each conversation, calculate the unread count
+        const conversationsWithUnread = await Promise.all(conversations.map(async (convo) => {
+            const unreadCount = await db.collection('messages').countDocuments({
+                conversationId: convo._id.toHexString(),
+                readBy: { $ne: userId }
+            });
+            return { ...convo, unreadCount };
+        }));
+
+        res.status(200).json(conversationsWithUnread);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch conversations.' });
     }
@@ -657,6 +758,15 @@ io.on('connection', (socket) => {
             io.to(conversationId).emit('receiveMessage', insertedMessage);
             updateResult.participantIds.forEach(id => {
                 io.to(id).emit('updateConversation', updateResult);
+                // Send push notification to the other user
+                if (id !== senderId) {
+                     sendPushNotification(
+                        id,
+                        updateResult.participants[senderId].name,
+                        content || (mediaType === 'image' ? 'Sent an image' : 'Sent a video'),
+                        `${process.env.NEXT_PUBLIC_BASE_URL}/messages/${conversationId}`
+                    );
+                }
             });
         }
         return callback({ success: true });
