@@ -469,7 +469,10 @@ app.post("/payments/approve-deposit", async (req, res) => {
     try {
         await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
             method: "POST",
-            headers: { 'Authorization': `Key ${process.env.PI_API_KEY}` },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY}`
+            },
         });
         res.json({ success: true });
     } catch (e) {
