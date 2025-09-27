@@ -1,6 +1,7 @@
 
 
 
+
 export type User = {
     id: string;
     username: string;
@@ -184,3 +185,12 @@ export type User = {
       tipMessage?: string;
     };
   };
+
+  export type Deposit = {
+      paymentId: string;
+      userId: string;
+      username: string;
+      amount: number;
+      txid: string;
+      createdAt: Date;
+  }
