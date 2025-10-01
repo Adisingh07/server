@@ -21,6 +21,8 @@ const allowedOrigins = [
     "https://6000-firebase-studio-1755769384224.cluster-ikxjzjhlifcwuroomfkjrx437g.cloudworkstations.dev",
     "https://connect-pi-roan.vercel.app",
     "https://api.minepi.com",
+    "https://studio--piconnect-nyzv3.us-central1.hosted.app/",
+    "https://app.connectpi.in",
     "https://connectpi.in"
 ];
 
