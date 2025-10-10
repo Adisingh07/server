@@ -1,4 +1,5 @@
 
+
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
@@ -21,8 +22,6 @@ const allowedOrigins = [
     "https://6000-firebase-studio-1755769384224.cluster-ikxjzjhlifcwuroomfkjrx437g.cloudworkstations.dev",
     "https://connect-pi-roan.vercel.app",
     "https://api.minepi.com",
-    "https://studio--piconnect-nyzv3.us-central1.hosted.app",
-    "https://app.connectpi.in",
     "https://connectpi.in"
 ];
 
@@ -471,10 +470,7 @@ app.post("/payments/approve-deposit", async (req, res) => {
     try {
         await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
             method: "POST",
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}`
-            },
+            headers: { 'Authorization': `Key ${process.env.PI_API_KEY}` },
         });
         res.json({ success: true });
     } catch (e) {
@@ -801,6 +797,58 @@ io.on('connection', (socket) => {
   socket.on('leaveRoom', (conversationId) => {
     socket.leave(conversationId);
     console.log(`Socket ${socket.id} left room ${conversationId}`);
+  });
+
+  socket.on('findOrCreateConversation', async (data, callback) => {
+    const { senderId, receiverId } = data;
+    if (!senderId || !receiverId) {
+      return callback({ success: false, error: 'Sender and receiver IDs are required.' });
+    }
+
+    try {
+        const participantIds = [senderId, receiverId].sort();
+        let conversation = await db.collection('conversations').findOne({
+            participantIds: { $all: participantIds }
+        });
+
+        if (conversation) {
+            return callback({ success: true, conversationId: conversation._id.toHexString() });
+        }
+
+        // Create new conversation if it doesn't exist
+        const [user1, user2] = await Promise.all([
+            getUserFromFirestore(senderId),
+            getUserFromFirestore(receiverId)
+        ]);
+
+        if (!user1 || !user2) {
+            return callback({ success: false, error: 'One or both users not found.' });
+        }
+
+        const newConversationData: Omit<Conversation, '_id'> = {
+            participantIds,
+            participants: { [senderId]: user1, [receiverId]: user2 },
+            lastMessage: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+
+        const result = await db.collection('conversations').insertOne(newConversationData);
+        const newConversationId = result.insertedId.toHexString();
+        
+        const finalConversation = await db.collection('conversations').findOne({ _id: result.insertedId });
+
+        // Notify both users that a new conversation has been created
+        participantIds.forEach(id => {
+            io.to(id).emit('newConversation', finalConversation);
+        });
+
+        callback({ success: true, conversationId: newConversationId });
+
+    } catch (error) {
+        console.error('Error in findOrCreateConversation:', error);
+        callback({ success: false, error: 'Server error while finding or creating conversation.' });
+    }
   });
 
   socket.on('sendMessage', async (messageData, callback) => {
