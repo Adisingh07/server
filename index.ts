@@ -254,25 +254,18 @@ app.get("/user/:uid", async (req, res) => {
 
 // 🔥 Incomplete Payment Handler
 app.post("/complete-payment", async (req, res) => {
-  try {
-    const payment = req.body; // frontend se aaya hua pending payment
-    console.log("Completing payment:", payment);
-
-    if (!payment.identifier) {
-      return res.status(400).json({ success: false, error: "Missing payment identifier" });
-    }
-
-    // 🔑 Pi API se verify / complete call
-    const verifyRes = await fetch(`${PI_API_BASE}/v2/payments/${payment.identifier}/complete`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Key ${process.env.PI_API_KEY}`, // Pi API key env me rakho
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        txid: payment.transaction?.txid || null
-      })
-    });
+  const { paymentId, txid, userId } = req.body;
+    console.log(`Completing payment ${paymentId} (tx: ${txid}) for user ${userId}`);
+    try {
+        // Step 1: Complete the payment with the Pi Platform
+        const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
+            method: "POST",
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${process.env.PI_API_KEY2}` 
+            },
+            body: JSON.stringify({ txid }),
+        });
 
     if (!verifyRes.ok) {
       const errText = await verifyRes.text();
