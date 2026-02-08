@@ -33,7 +33,7 @@ const corsOptions = {
 };
 
 const io = new Server(server, {
-  cors: corsOptions
+    cors: corsOptions
 });
 
 app.use(cors(corsOptions));
@@ -45,29 +45,29 @@ let db: Db;
 const PI_API_BASE = "https://api.minepi.com";
 
 async function connectDB() {
-  try {
-    const client = new MongoClient(MONGO_URI);
-    await client.connect();
-    db = client.db();
-    console.log("MongoDB connected successfully");
+    try {
+        const client = new MongoClient(MONGO_URI);
+        await client.connect();
+        db = client.db();
+        console.log("MongoDB connected successfully");
 
-    await db.collection('conversations').createIndex({ participantIds: 1 });
-    await db.collection('conversations').createIndex({ participantIds: 1, updatedAt: -1 });
-    await db.collection('messages').createIndex({ conversationId: 1, createdAt: -1 });
-    await db.collection('messageRequests').createIndex({ toId: 1 });
-    await db.collection('messageRequests').createIndex({ fromId: 1, toId: 1 }, { unique: true });
-    await db.collection('payments').createIndex({ userId: 1 });
-    await db.collection('payments').createIndex({ paymentId: 1 }, { unique: true });
-    await db.collection('donations').createIndex({ piUsername: 1 });
-    await db.collection('donations').createIndex({ paymentId: 1 }, { unique: true });
-    await db.collection('notifications').createIndex({ recipientId: 1, createdAt: -1 });
-    await db.collection('deposits').createIndex({ userId: 1 });
+        await db.collection('conversations').createIndex({ participantIds: 1 });
+        await db.collection('conversations').createIndex({ participantIds: 1, updatedAt: -1 });
+        await db.collection('messages').createIndex({ conversationId: 1, createdAt: -1 });
+        await db.collection('messageRequests').createIndex({ toId: 1 });
+        await db.collection('messageRequests').createIndex({ fromId: 1, toId: 1 }, { unique: true });
+        await db.collection('payments').createIndex({ userId: 1 });
+        await db.collection('payments').createIndex({ paymentId: 1 }, { unique: true });
+        await db.collection('donations').createIndex({ piUsername: 1 });
+        await db.collection('donations').createIndex({ paymentId: 1 }, { unique: true });
+        await db.collection('notifications').createIndex({ recipientId: 1, createdAt: -1 });
+        await db.collection('deposits').createIndex({ userId: 1 });
 
 
-  } catch (error) {
-    console.error("MongoDB connection failed:", error);
-    process.exit(1);
-  }
+    } catch (error) {
+        console.error("MongoDB connection failed:", error);
+        process.exit(1);
+    }
 }
 
 connectDB();
@@ -75,8 +75,8 @@ connectDB();
 
 app.get("/health", (req, res) => {
     res.status(200).send("ok");
-  });
-  
+});
+
 
 
 async function getUserFromFirestore(userId: string): Promise<User | null> {
@@ -86,7 +86,7 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
             const data = doc.data();
             const premiumUntil = data?.premiumUntil ? new Date(data.premiumUntil) : null;
             const daysLeft = premiumUntil ? Math.max(0, Math.ceil((premiumUntil.getTime() - Date.now()) / (1000 * 60 * 60 * 24))) : 0;
-            
+
             return {
                 id: doc.id,
                 username: data?.username || 'unknown_user',
@@ -114,7 +114,7 @@ async function sendPushNotification(userId: string, title: string, body: string,
         }
 
         const tokens = subscriptionsSnapshot.docs.map(doc => doc.data().token);
-        
+
         const message = {
             notification: { title, body },
             webpush: {
@@ -128,7 +128,7 @@ async function sendPushNotification(userId: string, title: string, body: string,
             },
             tokens: tokens,
         };
-        
+
         const messaging = (await import('firebase-admin/messaging')).getMessaging;
 
         await messaging().sendEachForMulticast(message);
@@ -153,9 +153,9 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
         io.to(notificationData.recipientId).emit('new_notification');
         console.log(`Notification created for ${notificationData.recipientId}`);
 
-         // Trigger push notification for message requests
-        if(notificationData.type === 'message_request') {
-             await sendPushNotification(
+        // Trigger push notification for message requests
+        if (notificationData.type === 'message_request') {
+            await sendPushNotification(
                 notificationData.recipientId,
                 'New Message Request',
                 `You have a new message request from ${notificationData.actor.name}.`,
@@ -176,7 +176,7 @@ app.get('/api/broadcast/active', async (req, res) => {
             .where('isActive', '==', true)
             .limit(1)
             .get();
-        
+
         if (snapshot.empty) {
             return res.status(404).json({ message: 'No active broadcast found.' });
         }
@@ -196,7 +196,7 @@ app.get('/api/broadcasts', async (req, res) => {
         const snapshot = await adminDb.collection('broadcasts')
             .orderBy('createdAt', 'desc')
             .get();
-        
+
         if (snapshot.empty) {
             return res.status(200).json([]);
         }
@@ -230,7 +230,7 @@ app.post("/auth/verify", async (req, res) => {
 
         const piUser = await piApiResponse.json();
         // Return the verified user object from Pi
-        res.send({ user: { uid: piUser.uid, username: piUser.username }});
+        res.send({ user: { uid: piUser.uid, username: piUser.username } });
     } catch (e) {
         console.error("Auth verification failed", e);
         res.status(500).send({ message: (e as Error).message });
@@ -240,74 +240,74 @@ app.post("/auth/verify", async (req, res) => {
 
 
 app.get("/user/:uid", async (req, res) => {
-  try {
-    const user = await getUserFromFirestore(req.params.uid);
-    if (!user) {
-      return res.status(404).send({ error: "User not found" });
+    try {
+        const user = await getUserFromFirestore(req.params.uid);
+        if (!user) {
+            return res.status(404).send({ error: "User not found" });
+        }
+        res.send({ user });
+    } catch (e) {
+        res.status(500).send({ error: (e as Error).message });
     }
-    res.send({ user });
-  } catch (e) {
-    res.status(500).send({ error: (e as Error).message });
-  }
 });
 
 
 // 🔥 Incomplete Payment Handler
 app.post("/complete-payment", async (req, res) => {
-  const { paymentId, txid, userId } = req.body;
+    const { paymentId, txid, userId } = req.body;
     console.log(`Completing payment ${paymentId} (tx: ${txid}) for user ${userId}`);
     try {
         // Step 1: Complete the payment with the Pi Platform
         const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
             method: "POST",
-            headers: { 
+            headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY2}` 
+                'Authorization': `Key ${process.env.PI_API_KEY2}`
             },
             body: JSON.stringify({ txid }),
         });
 
-    if (!verifyRes.ok) {
-      const errText = await verifyRes.text();
-      console.error("Pi API error:", errText);
-      return res.status(500).json({ success: false, error: "Pi API request failed" });
+        if (!verifyRes.ok) {
+            const errText = await verifyRes.text();
+            console.error("Pi API error:", errText);
+            return res.status(500).json({ success: false, error: "Pi API request failed" });
+        }
+
+        const verifiedPayment = await verifyRes.json();
+        console.log("Payment verified:", verifiedPayment);
+
+        // ✅ DB me save/update karo
+        await db.collection("payments").updateOne(
+            { paymentId: verifiedPayment.identifier },
+            { $set: { ...verifiedPayment, completedAt: new Date() } },
+            { upsert: true }
+        );
+
+        return res.json({ success: true, payment: verifiedPayment });
+    } catch (err) {
+        console.error("Error completing payment:", err);
+        return res.status(500).json({ success: false, error: "Internal server error" });
     }
-
-    const verifiedPayment = await verifyRes.json();
-    console.log("Payment verified:", verifiedPayment);
-
-    // ✅ DB me save/update karo
-    await db.collection("payments").updateOne(
-      { paymentId: verifiedPayment.identifier },
-      { $set: { ...verifiedPayment, completedAt: new Date() } },
-      { upsert: true }
-    );
-
-    return res.json({ success: true, payment: verifiedPayment });
-  } catch (err) {
-    console.error("Error completing payment:", err);
-    return res.status(500).json({ success: false, error: "Internal server error" });
-  }
 });
 
 app.post("/payments/approve", async (req, res) => {
-  const { paymentId, userId } = req.body;
-  console.log(`Approving payment ${paymentId} for user ${userId}`);
-  try {
-    // In a real app, you would verify the user making the request
-    // and check that the payment is for a valid product.
-    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
-        method: "POST",
-            headers: { 
+    const { paymentId, userId } = req.body;
+    console.log(`Approving payment ${paymentId} for user ${userId}`);
+    try {
+        // In a real app, you would verify the user making the request
+        // and check that the payment is for a valid product.
+        await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
+            method: "POST",
+            headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}` 
+                'Authorization': `Key ${process.env.PI_API_KEY}`
             },
-    });
-    res.send({ success: true });
-  } catch (e) {
-    console.error("Failed to approve payment", e);
-    res.status(500).send({ error: (e as Error).message });
-  }
+        });
+        res.send({ success: true });
+    } catch (e) {
+        console.error("Failed to approve payment", e);
+        res.status(500).send({ error: (e as Error).message });
+    }
 });
 
 
@@ -318,9 +318,9 @@ app.post("/payments/complete", async (req, res) => {
         // Step 1: Complete the payment with the Pi Platform
         const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
             method: "POST",
-            headers: { 
+            headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}` 
+                'Authorization': `Key ${process.env.PI_API_KEY}`
             },
             body: JSON.stringify({ txid }),
         });
@@ -330,23 +330,23 @@ app.post("/payments/complete", async (req, res) => {
             console.error("Failed to complete payment with Pi servers:", errorText);
             throw new Error("Failed to complete payment transaction.");
         }
-        
+
         const paymentData = await completeResponse.json();
 
         // Step 2: Grant premium access in Firestore
         const userRef = adminDb.collection('users').doc(userId);
         const userDoc = await userRef.get();
         if (!userDoc.exists) {
-             throw new Error("User to grant premium to was not found.");
+            throw new Error("User to grant premium to was not found.");
         }
         const userData = userDoc.data();
-        
+
         const now = new Date();
         // If user already has premium, extend it. Otherwise, start from now.
         const currentPremiumUntil = (userData?.premiumUntil && new Date(userData.premiumUntil) > now)
             ? new Date(userData.premiumUntil)
             : now;
-        
+
         const newPremiumUntil = new Date(currentPremiumUntil.getTime() + 30 * 24 * 60 * 60 * 1000);
 
         await userRef.update({
@@ -378,74 +378,74 @@ app.post("/payments/complete", async (req, res) => {
 
 
 app.post("/donate/approve", async (req, res) => {
-  const { paymentId } = req.body;
-  console.log(`Approving payment ${paymentId}`);
-  if (!paymentId) {
-      return res.status(400).send({ error: "paymentId is required" });
-  }
-  try {
-    // This endpoint is now generic and doesn't depend on user context.
-    await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
-        method: "POST",
-        headers: { 
+    const { paymentId } = req.body;
+    console.log(`Approving payment ${paymentId}`);
+    if (!paymentId) {
+        return res.status(400).send({ error: "paymentId is required" });
+    }
+    try {
+        // This endpoint is now generic and doesn't depend on user context.
+        await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/approve`, {
+            method: "POST",
+            headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Key ${process.env.PI_API_KEY}` 
+                'Authorization': `Key ${process.env.PI_API_KEY}`
             },
         });
-    res.send({ success: true });
-  } catch (e) {
-    console.error("Failed to approve payment", e);
-    res.status(500).send({ error: (e as Error).message });
-  }
+        res.send({ success: true });
+    } catch (e) {
+        console.error("Failed to approve payment", e);
+        res.status(500).send({ error: (e as Error).message });
+    }
 });
 
 app.post("/donations/complete", async (req, res) => {
-  const { paymentId, txid } = req.body;
-  console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
+    const { paymentId, txid } = req.body;
+    console.log(`💰 Completing donation ${paymentId} (tx: ${txid})`);
 
-  try {
-    // Step 1: Call Pi API to complete donation
-    const completeResponse = await fetch(
-      `${PI_API_BASE}/v2/payments/${paymentId}/complete`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Key ${process.env.PI_API_KEY}`,
-        },
-        body: JSON.stringify({ txid }),
-      }
-    );
+    try {
+        // Step 1: Call Pi API to complete donation
+        const completeResponse = await fetch(
+            `${PI_API_BASE}/v2/payments/${paymentId}/complete`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Key ${process.env.PI_API_KEY}`,
+                },
+                body: JSON.stringify({ txid }),
+            }
+        );
 
-    if (!completeResponse.ok) {
-      const errorText = await completeResponse.text();
-      console.error("❌ Failed to complete donation with Pi servers:", errorText);
-      return res.status(400).json({ success: false, error: errorText });
+        if (!completeResponse.ok) {
+            const errorText = await completeResponse.text();
+            console.error("❌ Failed to complete donation with Pi servers:", errorText);
+            return res.status(400).json({ success: false, error: errorText });
+        }
+
+        const paymentData = await completeResponse.json();
+
+        // Step 2: Prepare donation record safely
+        const donationDto: DonationDto = {
+            paymentId: paymentData.identifier,
+            piUsername: paymentData.from_user?.username || "anonymous",
+            amount: paymentData.amount,
+            memo: paymentData.memo,
+            createdAt: new Date(paymentData.created_at),
+        };
+
+        // Step 3: Save in DB
+        await db.collection("donations").insertOne(donationDto);
+
+        console.log(`✅ Donation of ${donationDto.amount}π from ${donationDto.piUsername} recorded.`);
+
+        // Step 4: Respond to frontend
+        return res.status(200).json({ success: true, donation: donationDto });
+
+    } catch (e) {
+        console.error("🔥 Failed to complete donation", e);
+        return res.status(500).json({ success: false, error: (e as Error).message });
     }
-
-    const paymentData = await completeResponse.json();
-
-    // Step 2: Prepare donation record safely
-    const donationDto: DonationDto = {
-      paymentId: paymentData.identifier,
-      piUsername: paymentData.from_user?.username || "anonymous",
-      amount: paymentData.amount,
-      memo: paymentData.memo,
-      createdAt: new Date(paymentData.created_at),
-    };
-
-    // Step 3: Save in DB
-    await db.collection("donations").insertOne(donationDto);
-
-    console.log(`✅ Donation of ${donationDto.amount}π from ${donationDto.piUsername} recorded.`);
-
-    // Step 4: Respond to frontend
-    return res.status(200).json({ success: true, donation: donationDto });
-
-  } catch (e) {
-    console.error("🔥 Failed to complete donation", e);
-    return res.status(500).json({ success: false, error: (e as Error).message });
-  }
 });
 
 
@@ -495,7 +495,7 @@ app.post("/payments/complete-deposit", async (req, res) => {
             console.error(`Failed to complete deposit with Pi servers:`, errorText);
             throw new Error(`Pi API Error: ${errorText}`);
         }
-        
+
         const paymentData = await completeResponse.json();
         const amount = paymentData.amount;
 
@@ -506,18 +506,18 @@ app.post("/payments/complete-deposit", async (req, res) => {
 
         const newBalance = await adminDb.runTransaction(async (transaction) => {
             const walletDoc = await transaction.get(walletRef);
-            
+
             // Atomically increment the balance
-            transaction.set(walletRef, { 
-                balance: FieldValue.increment(amount), 
-                username: username 
+            transaction.set(walletRef, {
+                balance: FieldValue.increment(amount),
+                username: username
             }, { merge: true });
 
             // To return the new balance, we must calculate it.
             const currentBalance = walletDoc.exists ? walletDoc.data()?.balance : 0;
             return currentBalance + amount;
         });
-        
+
         const depositRecord: Deposit = {
             paymentId: paymentData.identifier,
             userId,
@@ -527,7 +527,7 @@ app.post("/payments/complete-deposit", async (req, res) => {
             createdAt: new Date(paymentData.created_at),
         };
         await db.collection('deposits').insertOne(depositRecord);
-        
+
         // Record this deposit in the main transactions collection as well for a unified history
         const transactionRecord: Transaction = {
             id: adminDb.collection('transactions').doc().id,
@@ -540,7 +540,7 @@ app.post("/payments/complete-deposit", async (req, res) => {
             createdAt: new Date(paymentData.created_at).toISOString(),
         };
         await adminDb.collection('transactions').add(transactionRecord);
-        
+
         await createNotificationOnServer({
             recipientId: userId,
             type: 'fund_deposit',
@@ -603,6 +603,31 @@ app.post('/api/notifications/mark-read', async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: 'Failed to mark notifications as read.' });
     }
+    res.status(200).json({ success: true });
+} catch (error) {
+    res.status(500).json({ error: 'Failed to mark notifications as read.' });
+}
+});
+
+app.post('/api/notifications/register-push', async (req, res) => {
+    try {
+        const { userId, token } = req.body;
+        if (!userId || !token) {
+            return res.status(400).json({ error: 'User ID and token are required.' });
+        }
+
+        await adminDb.collection('pushSubscriptions').doc(token).set({
+            userId,
+            token,
+            updatedAt: new Date()
+        });
+
+        console.log(`Push token registered for user ${userId}`);
+        res.status(200).json({ success: true });
+    } catch (error) {
+        console.error('Error registering push token:', error);
+        res.status(500).json({ error: 'Failed to register push token.' });
+    }
 });
 
 app.get('/api/transactions/:userId', async (req, res) => {
@@ -613,7 +638,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
             .orderBy('createdAt', 'desc')
             .limit(20)
             .get();
-        
+
         const history = snapshot.docs.map(doc => doc.data() as Transaction);
         res.status(200).json(history);
     } catch (error) {
@@ -657,7 +682,7 @@ app.get('/api/conversation/:conversationId', async (req, res) => {
         }
         res.status(200).json(conversation);
     } catch (error) {
-         res.status(500).json({ error: 'Failed to fetch conversation details.' });
+        res.status(500).json({ error: 'Failed to fetch conversation details.' });
     }
 });
 
@@ -707,7 +732,7 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
     try {
         const { requestId } = req.params;
         const request = await db.collection('messageRequests').findOne({
-             _id: new ObjectId(requestId)
+            _id: new ObjectId(requestId)
         });
 
         if (!request) {
@@ -724,7 +749,7 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
         ]);
 
         if (!user1 || !user2) {
-             return res.status(404).json({ error: 'One or both users not found.' });
+            return res.status(404).json({ error: 'One or both users not found.' });
         }
 
         const newConversation: Omit<Conversation, '_id'> = {
@@ -753,9 +778,9 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
         // Update the new conversation with this first message as the lastMessage
         await db.collection('conversations').updateOne(
             { _id: convoResult.insertedId },
-            { $set: { lastMessage: { _id: msgResult.insertedId.toHexString(), ...newMessage }, updatedAt: new Date() }}
+            { $set: { lastMessage: { _id: msgResult.insertedId.toHexString(), ...newMessage }, updatedAt: new Date() } }
         );
-        
+
         // Finally, delete the request
         await db.collection('messageRequests').deleteOne({ _id: new ObjectId(requestId) });
 
@@ -776,206 +801,206 @@ app.post('/api/requests/:requestId/accept', async (req, res) => {
 
 // --- Socket.IO Logic ---
 io.on('connection', (socket) => {
-  const userId = socket.handshake.query.userId as string;
-  if (userId) {
-      console.log(`User connected: ${userId}, socket: ${socket.id}`);
-      socket.join(userId); // User joins a room for their own notifications
-  }
-
-  socket.on('joinRoom', (conversationId) => {
-    socket.join(conversationId);
-    console.log(`Socket ${socket.id} joined room ${conversationId}`);
-  });
-  
-  socket.on('leaveRoom', (conversationId) => {
-    socket.leave(conversationId);
-    console.log(`Socket ${socket.id} left room ${conversationId}`);
-  });
-
-  socket.on('findOrCreateConversation', async (data, callback) => {
-    const { senderId, receiverId } = data;
-    if (!senderId || !receiverId) {
-      return callback({ success: false, error: 'Sender and receiver IDs are required.' });
+    const userId = socket.handshake.query.userId as string;
+    if (userId) {
+        console.log(`User connected: ${userId}, socket: ${socket.id}`);
+        socket.join(userId); // User joins a room for their own notifications
     }
 
-    try {
-        const participantIds = [senderId, receiverId].sort();
-        let conversation = await db.collection('conversations').findOne({
-            participantIds: { $all: participantIds }
-        });
+    socket.on('joinRoom', (conversationId) => {
+        socket.join(conversationId);
+        console.log(`Socket ${socket.id} joined room ${conversationId}`);
+    });
 
-        if (conversation) {
-            return callback({ success: true, conversationId: conversation._id.toHexString() });
+    socket.on('leaveRoom', (conversationId) => {
+        socket.leave(conversationId);
+        console.log(`Socket ${socket.id} left room ${conversationId}`);
+    });
+
+    socket.on('findOrCreateConversation', async (data, callback) => {
+        const { senderId, receiverId } = data;
+        if (!senderId || !receiverId) {
+            return callback({ success: false, error: 'Sender and receiver IDs are required.' });
         }
 
-        // Create new conversation if it doesn't exist
-        const [user1, user2] = await Promise.all([
-            getUserFromFirestore(senderId),
-            getUserFromFirestore(receiverId)
-        ]);
-
-        if (!user1 || !user2) {
-            return callback({ success: false, error: 'One or both users not found.' });
-        }
-
-        const newConversationData: Omit<Conversation, '_id'> = {
-            participantIds,
-            participants: { [senderId]: user1, [receiverId]: user2 },
-            lastMessage: null,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-        };
-
-        const result = await db.collection('conversations').insertOne(newConversationData);
-        const newConversationId = result.insertedId.toHexString();
-        
-        const finalConversation = await db.collection('conversations').findOne({ _id: result.insertedId });
-
-        // Notify both users that a new conversation has been created
-        participantIds.forEach(id => {
-            io.to(id).emit('newConversation', finalConversation);
-        });
-
-        callback({ success: true, conversationId: newConversationId });
-
-    } catch (error) {
-        console.error('Error in findOrCreateConversation:', error);
-        callback({ success: false, error: 'Server error while finding or creating conversation.' });
-    }
-  });
-
-  socket.on('sendMessage', async (messageData, callback) => {
-    try {
-      const { conversationId, senderId, receiverId, content, mediaUrl, mediaType } = messageData;
-
-      if (!senderId || (!conversationId && !receiverId)) {
-        return callback({ success: false, error: "Missing sender or receiver ID." });
-      }
-
-      // --- SCENARIO 1: Sending message in an EXISTING conversation ---
-      if (conversationId) {
-         if (!content && !mediaUrl) return callback({ success: false, error: "Message content or media is empty." });
-        const newMessage: Omit<Message, '_id'> = {
-          conversationId, senderId, content, mediaUrl, mediaType,
-          createdAt: new Date(), readBy: [senderId],
-          reactions: {}, deletedFor: [],
-        };
-        const messageResult = await db.collection('messages').insertOne(newMessage);
-        const insertedMessage = { _id: messageResult.insertedId.toHexString(), ...newMessage };
-
-        const updateResult = await db.collection('conversations').findOneAndUpdate(
-          { _id: new ObjectId(conversationId) },
-          { $set: { lastMessage: insertedMessage, updatedAt: new Date() } },
-          { returnDocument: 'after' }
-        );
-
-        if (updateResult) {
-            io.to(conversationId).emit('receiveMessage', insertedMessage);
-            updateResult.participantIds.forEach(id => {
-                io.to(id).emit('updateConversation', updateResult);
-                // Send push notification to the other user
-                if (id !== senderId) {
-                     sendPushNotification(
-                        id,
-                        updateResult.participants[senderId].name,
-                        content || (mediaType === 'image' ? 'Sent an image' : 'Sent a video'),
-                        `${process.env.NEXT_PUBLIC_BASE_URL}/messages/${conversationId}`
-                    );
-                }
+        try {
+            const participantIds = [senderId, receiverId].sort();
+            let conversation = await db.collection('conversations').findOne({
+                participantIds: { $all: participantIds }
             });
+
+            if (conversation) {
+                return callback({ success: true, conversationId: conversation._id.toHexString() });
+            }
+
+            // Create new conversation if it doesn't exist
+            const [user1, user2] = await Promise.all([
+                getUserFromFirestore(senderId),
+                getUserFromFirestore(receiverId)
+            ]);
+
+            if (!user1 || !user2) {
+                return callback({ success: false, error: 'One or both users not found.' });
+            }
+
+            const newConversationData: Omit<Conversation, '_id'> = {
+                participantIds,
+                participants: { [senderId]: user1, [receiverId]: user2 },
+                lastMessage: null,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+            const result = await db.collection('conversations').insertOne(newConversationData);
+            const newConversationId = result.insertedId.toHexString();
+
+            const finalConversation = await db.collection('conversations').findOne({ _id: result.insertedId });
+
+            // Notify both users that a new conversation has been created
+            participantIds.forEach(id => {
+                io.to(id).emit('newConversation', finalConversation);
+            });
+
+            callback({ success: true, conversationId: newConversationId });
+
+        } catch (error) {
+            console.error('Error in findOrCreateConversation:', error);
+            callback({ success: false, error: 'Server error while finding or creating conversation.' });
         }
-        return callback({ success: true });
-      }
+    });
 
-      // --- SCENARIO 2: Sending a NEW message (check for existing convo or request) ---
-      if (!receiverId) return callback({ success: false, error: "Receiver ID is required for new messages." });
-      
-      const participantIds = [senderId, receiverId].sort();
-      let conversation = await db.collection('conversations').findOne({
-           participantIds: { $all: participantIds }
-      });
-      
-      // If conversation already exists, just return its ID.
-      if (conversation) {
-         return callback({ success: true, conversationId: conversation._id.toHexString() });
-      }
-      
-      // Check if a request already exists (either way)
-      let request = await db.collection('messageRequests').findOne({
-          $or: [
-              { fromId: senderId, toId: receiverId },
-              { fromId: receiverId, toId: senderId }
-          ]
-      });
+    socket.on('sendMessage', async (messageData, callback) => {
+        try {
+            const { conversationId, senderId, receiverId, content, mediaUrl, mediaType } = messageData;
 
-      if (request) {
-          return callback({ success: true, isRequest: true, message: "A message request already exists." });
-      }
-      
-      // If no message content, it was just a check. Don't create a request.
-      if (!content && !mediaUrl) {
-          return callback({ success: true, isRequest: false });
-      }
+            if (!senderId || (!conversationId && !receiverId)) {
+                return callback({ success: false, error: "Missing sender or receiver ID." });
+            }
 
-      // Create a new Message Request
-      const fromUser = await getUserFromFirestore(senderId);
-      if (!fromUser) return callback({ success: false, error: 'Sender not found.' });
+            // --- SCENARIO 1: Sending message in an EXISTING conversation ---
+            if (conversationId) {
+                if (!content && !mediaUrl) return callback({ success: false, error: "Message content or media is empty." });
+                const newMessage: Omit<Message, '_id'> = {
+                    conversationId, senderId, content, mediaUrl, mediaType,
+                    createdAt: new Date(), readBy: [senderId],
+                    reactions: {}, deletedFor: [],
+                };
+                const messageResult = await db.collection('messages').insertOne(newMessage);
+                const insertedMessage = { _id: messageResult.insertedId.toHexString(), ...newMessage };
 
-      const newRequest: Omit<MessageRequest, '_id'> = {
-          fromId: senderId,
-          toId: receiverId,
-          fromUser: {
-              id: fromUser.id,
-              username: fromUser.username,
-              name: fromUser.name,
-              avatarUrl: fromUser.avatarUrl,
-              premium: fromUser.premium || false,
-          },
-          initialMessage: {
-              content,
-              createdAt: new Date(),
-          },
-          createdAt: new Date(),
-      };
-      
-      await db.collection('messageRequests').insertOne(newRequest);
-      
-      // Create a notification for the message request
-      await createNotificationOnServer({
-          recipientId: receiverId,
-          actor: { id: fromUser.id, name: fromUser.name, username: fromUser.username, avatarUrl: fromUser.avatarUrl },
-          type: 'message_request'
-      });
+                const updateResult = await db.collection('conversations').findOneAndUpdate(
+                    { _id: new ObjectId(conversationId) },
+                    { $set: { lastMessage: insertedMessage, updatedAt: new Date() } },
+                    { returnDocument: 'after' }
+                );
 
-      callback({ success: true, isRequest: true });
-      
-    } catch (error) {
-      console.error('Error sending message:', error);
-      callback({ success: false, error: 'Failed to send message.' });
-    }
-  });
+                if (updateResult) {
+                    io.to(conversationId).emit('receiveMessage', insertedMessage);
+                    updateResult.participantIds.forEach(id => {
+                        io.to(id).emit('updateConversation', updateResult);
+                        // Send push notification to the other user
+                        if (id !== senderId) {
+                            sendPushNotification(
+                                id,
+                                updateResult.participants[senderId].name,
+                                content || (mediaType === 'image' ? 'Sent an image' : 'Sent a video'),
+                                `${process.env.NEXT_PUBLIC_BASE_URL}/messages/${conversationId}`
+                            );
+                        }
+                    });
+                }
+                return callback({ success: true });
+            }
 
-  socket.on('typing', ({ conversationId, isTyping }) => {
-    socket.to(conversationId).emit('typing', { isTyping });
-  });
+            // --- SCENARIO 2: Sending a NEW message (check for existing convo or request) ---
+            if (!receiverId) return callback({ success: false, error: "Receiver ID is required for new messages." });
 
-  socket.on('markAsRead', async ({ conversationId, userId }) => {
-     try {
-        const updateResult = await db.collection('messages').updateMany(
-            { conversationId: conversationId, readBy: { $ne: userId } },
-            { $addToSet: { readBy: userId } }
-        );
+            const participantIds = [senderId, receiverId].sort();
+            let conversation = await db.collection('conversations').findOne({
+                participantIds: { $all: participantIds }
+            });
 
-        if (updateResult.modifiedCount > 0) {
-            // Notify the room that messages have been read
-            io.to(conversationId).emit('messagesRead', { conversationId, readerId: userId });
+            // If conversation already exists, just return its ID.
+            if (conversation) {
+                return callback({ success: true, conversationId: conversation._id.toHexString() });
+            }
+
+            // Check if a request already exists (either way)
+            let request = await db.collection('messageRequests').findOne({
+                $or: [
+                    { fromId: senderId, toId: receiverId },
+                    { fromId: receiverId, toId: senderId }
+                ]
+            });
+
+            if (request) {
+                return callback({ success: true, isRequest: true, message: "A message request already exists." });
+            }
+
+            // If no message content, it was just a check. Don't create a request.
+            if (!content && !mediaUrl) {
+                return callback({ success: true, isRequest: false });
+            }
+
+            // Create a new Message Request
+            const fromUser = await getUserFromFirestore(senderId);
+            if (!fromUser) return callback({ success: false, error: 'Sender not found.' });
+
+            const newRequest: Omit<MessageRequest, '_id'> = {
+                fromId: senderId,
+                toId: receiverId,
+                fromUser: {
+                    id: fromUser.id,
+                    username: fromUser.username,
+                    name: fromUser.name,
+                    avatarUrl: fromUser.avatarUrl,
+                    premium: fromUser.premium || false,
+                },
+                initialMessage: {
+                    content,
+                    createdAt: new Date(),
+                },
+                createdAt: new Date(),
+            };
+
+            await db.collection('messageRequests').insertOne(newRequest);
+
+            // Create a notification for the message request
+            await createNotificationOnServer({
+                recipientId: receiverId,
+                actor: { id: fromUser.id, name: fromUser.name, username: fromUser.username, avatarUrl: fromUser.avatarUrl },
+                type: 'message_request'
+            });
+
+            callback({ success: true, isRequest: true });
+
+        } catch (error) {
+            console.error('Error sending message:', error);
+            callback({ success: false, error: 'Failed to send message.' });
         }
-     } catch (error) {
-         console.error('Error marking messages as read:', error);
-     }
-  });
+    });
 
-  socket.on('reactToMessage', async ({ messageId, userId, reaction }) => {
+    socket.on('typing', ({ conversationId, isTyping }) => {
+        socket.to(conversationId).emit('typing', { isTyping });
+    });
+
+    socket.on('markAsRead', async ({ conversationId, userId }) => {
+        try {
+            const updateResult = await db.collection('messages').updateMany(
+                { conversationId: conversationId, readBy: { $ne: userId } },
+                { $addToSet: { readBy: userId } }
+            );
+
+            if (updateResult.modifiedCount > 0) {
+                // Notify the room that messages have been read
+                io.to(conversationId).emit('messagesRead', { conversationId, readerId: userId });
+            }
+        } catch (error) {
+            console.error('Error marking messages as read:', error);
+        }
+    });
+
+    socket.on('reactToMessage', async ({ messageId, userId, reaction }) => {
         try {
             const message = await db.collection('messages').findOne({ _id: new ObjectId(messageId) });
             if (!message) return;
@@ -993,7 +1018,7 @@ io.on('connection', (socket) => {
                 });
                 reactions[reaction] = [...(reactions[reaction] || []), userId];
             }
-            
+
             // Clean up empty reaction arrays
             Object.keys(reactions).forEach(key => {
                 if (reactions[key].length === 0) {
@@ -1006,7 +1031,7 @@ io.on('connection', (socket) => {
                 { $set: { reactions } },
                 { returnDocument: 'after' }
             );
-            
+
             if (updateResult) {
                 io.to(message.conversationId).emit('updateMessage', updateResult);
             }
@@ -1016,13 +1041,13 @@ io.on('connection', (socket) => {
         }
     });
 
-  socket.on('deleteMessage', async ({ messageId, userId }) => {
-      try {
+    socket.on('deleteMessage', async ({ messageId, userId }) => {
+        try {
             const message = await db.collection('messages').findOne({ _id: new ObjectId(messageId) });
             if (!message || message.senderId !== userId) return; // Only sender can delete
 
             await db.collection('messages').deleteOne({ _id: new ObjectId(messageId) });
-            
+
             io.to(message.conversationId).emit('deleteMessage', messageId);
 
             // If it was the last message, update the conversation's lastMessage
@@ -1033,33 +1058,33 @@ io.on('connection', (socket) => {
                     .sort({ createdAt: -1 })
                     .limit(1)
                     .next();
-                
+
                 await db.collection('conversations').updateOne(
                     { _id: new ObjectId(message.conversationId) },
                     { $set: { lastMessage: newLastMessage, updatedAt: newLastMessage?.createdAt || new Date() } }
                 );
 
-                 const updatedConversation = await db.collection('conversations').findOne({ _id: new ObjectId(message.conversationId) });
-                  if (updatedConversation) {
+                const updatedConversation = await db.collection('conversations').findOne({ _id: new ObjectId(message.conversationId) });
+                if (updatedConversation) {
                     updatedConversation.participantIds.forEach(id => {
                         io.to(id).emit('updateConversation', updatedConversation);
                     });
                 }
             }
 
-      } catch(error) {
-          console.error("Error deleting message:", error);
-      }
-  });
+        } catch (error) {
+            console.error("Error deleting message:", error);
+        }
+    });
 
 
-  socket.on('disconnect', () => {
-    console.log(`User disconnected: ${socket.id}`);
-  });
+    socket.on('disconnect', () => {
+        console.log(`User disconnected: ${socket.id}`);
+    });
 });
 
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Chat server running on port ${PORT}`);
+    console.log(`Chat server running on port ${PORT}`);
 });
