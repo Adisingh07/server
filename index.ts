@@ -590,24 +590,28 @@ app.get('/api/notifications/:userId', async (req, res) => {
     }
 });
 
+
 app.post('/api/notifications/mark-read', async (req, res) => {
     try {
         const { userId } = req.body;
-        if (!userId) return res.status(400).json({ error: 'User ID is required.' });
+
+        if (!userId) {
+            return res.status(400).json({ error: 'User ID is required.' });
+        }
 
         await db.collection('notifications').updateMany(
             { recipientId: userId, read: false },
             { $set: { read: true } }
         );
-        res.status(200).json({ success: true });
+
+        return res.status(200).json({ success: true });
+
     } catch (error) {
-        res.status(500).json({ error: 'Failed to mark notifications as read.' });
+        return res.status(500).json({ error: 'Failed to mark notifications as read.' });
     }
-    res.status(200).json({ success: true });
-} catch (error) {
-    res.status(500).json({ error: 'Failed to mark notifications as read.' });
-}
 });
+
+;
 
 app.post('/api/notifications/register-push', async (req, res) => {
     try {
