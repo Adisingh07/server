@@ -564,7 +564,7 @@ app.post("/payments/complete-deposit", async (req, res) => {
         if (!userDoc.exists) throw new Error(`User ${userId} not found.`);
         const username = userDoc.data()?.username;
 
-        const newBalance = await adminDb.runTransaction(async (transaction) => {
+        const newBalance = await adminDb.runTransaction(async (transaction: any) => {
             const walletDoc = await transaction.get(walletRef);
 
             // Atomically increment the balance
@@ -705,7 +705,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
 
 // --- CONVERSATION & MESSAGE API Endpoints ---
 
-app.get('/api/conversations/:userId', async (req, res) => {
+app.get('/api/conversations/:userId', async (req: express.Request, res: express.Response) => {
     try {
         const { userId } = req.params;
         const conversations = await db.collection('conversations').find({
@@ -714,7 +714,7 @@ app.get('/api/conversations/:userId', async (req, res) => {
         }).sort({ updatedAt: -1 }).toArray();
 
         // For each conversation, calculate the unread count
-        const conversationsWithUnread = await Promise.all(conversations.map(async (convo) => {
+        const conversationsWithUnread = await Promise.all(conversations.map(async (convo: any) => {
             const unreadCount = await db.collection('messages').countDocuments({
                 conversationId: convo._id.toHexString(),
                 readBy: { $ne: userId },
@@ -744,7 +744,7 @@ app.get('/api/conversation/:conversationId', async (req, res) => {
     }
 });
 
-app.get('/api/messages/:conversationId', async (req, res) => {
+app.get('/api/messages/:conversationId', async (req: express.Request, res: express.Response) => {
     try {
         const { conversationId } = req.params;
         const userId = req.query.userId as string; // Accept userId for filtering
@@ -761,7 +761,7 @@ app.get('/api/messages/:conversationId', async (req, res) => {
     }
 });
 
-app.delete('/api/conversation/:conversationId', async (req, res) => {
+app.delete('/api/conversation/:conversationId', async (req: express.Request, res: express.Response) => {
     try {
         const { conversationId } = req.params;
         
@@ -789,7 +789,7 @@ app.delete('/api/conversation/:conversationId', async (req, res) => {
     }
 });
 
-app.post('/api/conversation/:conversationId/delete-for-me', async (req, res) => {
+app.post('/api/conversation/:conversationId/delete-for-me', async (req: express.Request, res: express.Response) => {
     try {
         const { conversationId } = req.params;
         const { userId } = req.body;
@@ -1008,7 +1008,13 @@ io.on('connection', (socket) => {
 
                 const updateResult = await db.collection('conversations').findOneAndUpdate(
                     { _id: new ObjectId(conversationId) },
-                    { $set: { lastMessage: insertedMessage, updatedAt: new Date() } },
+                    { 
+                        $set: { 
+                            lastMessage: insertedMessage, 
+                            updatedAt: new Date(),
+                            deletedFor: [] // -- CLEAR DELETED FOR ME STATE --
+                        } 
+                    },
                     { returnDocument: 'after' }
                 );
 
