@@ -75,7 +75,7 @@ async function connectDB() {
 connectDB();
 
 
-app.get("/health", (req, res) => {
+app.get("/health", (req: express.Request, res: express.Response) => {
     res.status(200).send("ok");
 });
 
@@ -636,7 +636,7 @@ app.post('/api/notifications/create', async (req, res) => {
 });
 
 
-app.get('/api/notifications/:userId', async (req, res) => {
+app.get('/api/notifications/:userId', async (req: express.Request, res: express.Response) => {
     try {
         const { userId } = req.params;
         const notifications = await db.collection('notifications')
@@ -650,7 +650,7 @@ app.get('/api/notifications/:userId', async (req, res) => {
     }
 });
 
-app.post('/api/notifications/mark-read', async (req, res) => {
+app.post('/api/notifications/mark-read', async (req: express.Request, res: express.Response) => {
     try {
         const { userId } = req.body;
         if (!userId) return res.status(400).json({ error: 'User ID is required.' });
@@ -665,7 +665,7 @@ app.post('/api/notifications/mark-read', async (req, res) => {
     }
 });
 
-app.post('/api/notifications/register-push', async (req, res) => {
+app.post('/api/notifications/register-push', async (req: express.Request, res: express.Response) => {
     try {
         const { userId, token } = req.body;
         if (!userId || !token) {
@@ -709,14 +709,16 @@ app.get('/api/conversations/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
         const conversations = await db.collection('conversations').find({
-            participantIds: userId
+            participantIds: userId,
+            deletedFor: { $ne: userId } // -- FILTER OUT DELETED FOR ME --
         }).sort({ updatedAt: -1 }).toArray();
 
         // For each conversation, calculate the unread count
         const conversationsWithUnread = await Promise.all(conversations.map(async (convo) => {
             const unreadCount = await db.collection('messages').countDocuments({
                 conversationId: convo._id.toHexString(),
-                readBy: { $ne: userId }
+                readBy: { $ne: userId },
+                deletedFor: { $ne: userId } // -- ALSO FILTER MESSAGES --
             });
             return { ...convo, unreadCount };
         }));
@@ -745,12 +747,71 @@ app.get('/api/conversation/:conversationId', async (req, res) => {
 app.get('/api/messages/:conversationId', async (req, res) => {
     try {
         const { conversationId } = req.params;
-        const messages = await db.collection('messages').find({
-            conversationId: conversationId
-        }).sort({ createdAt: 1 }).toArray();
+        const userId = req.query.userId as string; // Accept userId for filtering
+
+        const query: any = { conversationId: conversationId };
+        if (userId) {
+            query.deletedFor = { $ne: userId };
+        }
+
+        const messages = await db.collection('messages').find(query).sort({ createdAt: 1 }).toArray();
         res.status(200).json(messages);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch messages.' });
+    }
+});
+
+app.delete('/api/conversation/:conversationId', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        
+        // 1. Delete all messages
+        await db.collection('messages').deleteMany({
+            conversationId: conversationId
+        });
+        
+        // 2. Delete the conversation
+        const result = await db.collection('conversations').deleteOne({
+            _id: new ObjectId(conversationId)
+        });
+        
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: 'Conversation not found.' });
+        }
+        
+        // 3. Notify participants via socket
+        io.to(conversationId).emit('conversationDeleted', { conversationId });
+        
+        res.status(200).json({ success: true, message: 'Conversation deleted successfully.' });
+    } catch (error) {
+        console.error('Delete conversation error:', error);
+        res.status(500).json({ error: 'Failed to delete conversation.' });
+    }
+});
+
+app.post('/api/conversation/:conversationId/delete-for-me', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const { userId } = req.body;
+        
+        if (!userId) return res.status(400).json({ error: 'User ID is required.' });
+
+        // 1. Mark conversation as deleted for user
+        await db.collection('conversations').updateOne(
+            { _id: new ObjectId(conversationId) },
+            { $addToSet: { deletedFor: userId } }
+        );
+
+        // 2. Mark all existing messages as deleted for user
+        await db.collection('messages').updateMany(
+            { conversationId: conversationId },
+            { $addToSet: { deletedFor: userId } }
+        );
+
+        res.status(200).json({ success: true, message: 'Conversation deleted for you.' });
+    } catch (error) {
+        console.error('Delete for me error:', error);
+        res.status(500).json({ error: 'Failed to delete for you.' });
     }
 });
 
@@ -1136,6 +1197,17 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('deleteMessageForMe', async ({ messageId, userId }: { messageId: string, userId: string }) => {
+        try {
+            await db.collection('messages').updateOne(
+                { _id: new ObjectId(messageId) },
+                { $addToSet: { deletedFor: userId } }
+            );
+            // No need to emit to room, as it's only for this user
+        } catch (error) {
+            console.error("Error hiding message for me:", error);
+        }
+    });
 
     socket.on('disconnect', () => {
         console.log(`User disconnected: ${socket.id}`);
