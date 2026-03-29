@@ -22,7 +22,9 @@ const allowedOrigins = [
     "https://6000-firebase-studio-1755769384224.cluster-ikxjzjhlifcwuroomfkjrx437g.cloudworkstations.dev",
     "https://connect-pi-roan.vercel.app",
     "https://api.minepi.com",
-    "https://connectpi.in"
+    "https://connectpi.in",
+    "https://*.connectpi.in",
+    "http://localhost:9002"
 ];
 
 
@@ -108,37 +110,95 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
 
 async function sendPushNotification(userId: string, title: string, body: string, url: string) {
     try {
-        const subscriptionsSnapshot = await adminDb.collection('pushSubscriptions').where('userId', '==', userId).get();
-        if (subscriptionsSnapshot.empty) {
-            return;
-        }
+        const docRef = adminDb.collection('pushnotification').doc(userId);
+        const doc = await docRef.get();
+        if (!doc.exists) return;
 
-        const tokens = subscriptionsSnapshot.docs.map(doc => doc.data().token);
+        const data = doc.data();
+        const tokens = data?.customPushToken || [];
+        if (tokens.length === 0) return;
 
-        const message = {
-            notification: { title, body },
-            webpush: {
-                notification: {
-                    icon: '/apple-touch-icon.png',
-                    body: body,
-                },
-                fcm_options: {
-                    link: url,
-                },
-            },
-            tokens: tokens,
-        };
+        const messages = tokens.map((token: string) => ({
+            to: token,
+            title,
+            body,
+            data: { url },
+            channelId: 'default'
+        }));
 
-        const messaging = (await import('firebase-admin/messaging')).getMessaging;
-
-        await messaging().sendEachForMulticast(message);
-        console.log(`Push notification sent to ${userId}`);
-
+        await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(messages),
+        });
     } catch (error) {
         console.error(`Failed to send push notification to ${userId}:`, error);
     }
 }
 
+async function sendChatPushNotification(receiverId: string, senderId: string, senderName: string, content: string, mediaType: string | null, conversationId: string) {
+    try {
+        const docRef = adminDb.collection('pushnotification').doc(receiverId);
+        const doc = await docRef.get();
+        if (!doc.exists) return;
+
+        const data = doc.data();
+        const mutedUsers = data?.mutedUsers || [];
+        
+        // --- 1. Mute Check ---
+        if (mutedUsers.includes(senderId)) {
+            console.log(`Notification skipped: User ${receiverId} has muted ${senderId}`);
+            return;
+        }
+
+        const tokens = data?.customPushToken || [];
+        if (tokens.length === 0) return;
+
+        // --- 2. Build Notification Content ---
+        let body = content;
+        if (!content && mediaType) {
+            body = mediaType === 'image' ? 'Sent an image 📷' : 'Sent a video 📹';
+        }
+
+        const messages = tokens.map((token: string) => ({
+            to: token,
+            title: senderName,
+            body: body,
+            data: { type: 'MESSAGE', conversationId },
+            channelId: 'urgent', // High priority for messages
+            sound: 'default'
+        }));
+
+        // --- 3. Send to Expo API ---
+        const response = await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(messages),
+        });
+
+        const result = await response.json();
+
+        // --- 4. Cleanup Invalid Tokens ---
+        if (result.data) {
+            const tokensToRemove: string[] = [];
+            result.data.forEach((item: any, index: number) => {
+                if (item.status === 'error' && item.details?.error === 'DeviceNotRegistered') {
+                    tokensToRemove.push(tokens[index]);
+                }
+            });
+
+            if (tokensToRemove.length > 0) {
+                console.log(`Removing ${tokensToRemove.length} inactive tokens for user ${receiverId}`);
+                await docRef.update({
+                    customPushToken: FieldValue.arrayRemove(...tokensToRemove)
+                });
+            }
+        }
+    } catch (error) {
+        // Silently log error as requested
+        console.error('Chat notification delivery failed:', error);
+    }
+}
 async function createNotificationOnServer(notificationData: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
     if (notificationData.recipientId === notificationData.actor.id) {
         return; // Don't notify users of their own actions
@@ -590,28 +650,20 @@ app.get('/api/notifications/:userId', async (req, res) => {
     }
 });
 
-
 app.post('/api/notifications/mark-read', async (req, res) => {
     try {
         const { userId } = req.body;
-
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID is required.' });
-        }
+        if (!userId) return res.status(400).json({ error: 'User ID is required.' });
 
         await db.collection('notifications').updateMany(
             { recipientId: userId, read: false },
             { $set: { read: true } }
         );
-
-        return res.status(200).json({ success: true });
-
+        res.status(200).json({ success: true });
     } catch (error) {
-        return res.status(500).json({ error: 'Failed to mark notifications as read.' });
+        res.status(500).json({ error: 'Failed to mark notifications as read.' });
     }
 });
-
-;
 
 app.post('/api/notifications/register-push', async (req, res) => {
     try {
@@ -875,7 +927,7 @@ io.on('connection', (socket) => {
 
     socket.on('sendMessage', async (messageData, callback) => {
         try {
-            const { conversationId, senderId, receiverId, content, mediaUrl, mediaType } = messageData;
+            const { conversationId, senderId, receiverId, content, mediaUrl, mediaType, replyTo } = messageData;
 
             if (!senderId || (!conversationId && !receiverId)) {
                 return callback({ success: false, error: "Missing sender or receiver ID." });
@@ -888,6 +940,7 @@ io.on('connection', (socket) => {
                     conversationId, senderId, content, mediaUrl, mediaType,
                     createdAt: new Date(), readBy: [senderId],
                     reactions: {}, deletedFor: [],
+                    replyTo: replyTo || null,
                 };
                 const messageResult = await db.collection('messages').insertOne(newMessage);
                 const insertedMessage = { _id: messageResult.insertedId.toHexString(), ...newMessage };
@@ -904,11 +957,13 @@ io.on('connection', (socket) => {
                         io.to(id).emit('updateConversation', updateResult);
                         // Send push notification to the other user
                         if (id !== senderId) {
-                            sendPushNotification(
+                            sendChatPushNotification(
                                 id,
+                                senderId,
                                 updateResult.participants[senderId].name,
-                                content || (mediaType === 'image' ? 'Sent an image' : 'Sent a video'),
-                                `${process.env.NEXT_PUBLIC_BASE_URL}/messages/${conversationId}`
+                                content || '',
+                                mediaType,
+                                conversationId
                             );
                         }
                     });
