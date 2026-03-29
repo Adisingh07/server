@@ -106,18 +106,26 @@ export type User = {
       updatedAt: Date; // Changed to Date type
   }
   
-  export type Message = {
-      _id: string; // Changed from id to _id for MongoDB
-      conversationId: string;
-      senderId: string;
-      content: string;
-      mediaUrl?: string;
-      mediaType?: 'image' | 'video';
-      createdAt: Date; // Changed to Date type
-      readBy: string[];
-      reactions: { [emoji: string]: string[] }; // e.g. { '👍': ['user1', 'user2'] }
-      deletedFor: string[]; // Array of user IDs for whom the message is deleted
-  }
+export interface Message {
+    _id: string;
+    conversationId: string;
+    senderId: string;
+    content: string;
+    mediaUrl?: string | null;
+    mediaType?: 'image' | 'video' | null;
+    createdAt: string | Date;
+    readBy: string[];
+    reactions: { [key: string]: string[] }; // emoji -> userIds
+    deletedFor: string[];
+    replyTo?: {
+        _id: string;
+        content: string;
+        senderId: string;
+        senderName?: string;
+        mediaUrl?: string | null;
+        mediaType?: 'image' | 'video' | null;
+    } | null;
+}
   
   export type MessageRequest = {
       _id: string;
