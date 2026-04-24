@@ -63,6 +63,7 @@ async function connectDB() {
         await db.collection('donations').createIndex({ piUsername: 1 });
         await db.collection('donations').createIndex({ paymentId: 1 }, { unique: true });
         await db.collection('notifications').createIndex({ recipientId: 1, createdAt: -1 });
+        await db.collection('notifications').createIndex({ recipientId: 1, groupKey: 1, read: 1, updatedAt: -1 });
         await db.collection('deposits').createIndex({ userId: 1 });
 
 
@@ -136,40 +137,70 @@ async function sendPushNotification(userId: string, title: string, body: string,
     }
 }
 
-async function sendChatPushNotification(receiverId: string, senderId: string, senderName: string, content: string, mediaType: string | null, conversationId: string) {
+async function isUserOnline(userId: string) {
+    try {
+        const sockets = await io.in(userId).allSockets();
+        return sockets.size > 0;
+    } catch (error) {
+        console.error(`Failed to check online status for ${userId}:`, error);
+        return false;
+    }
+}
+
+// --- WhatsApp-Style Debounce Map ---
+// Groups burst messages from the same sender into a single notification
+const CHAT_NOTIFICATION_DEBOUNCE_MS = 3000; // 3 seconds window
+const pendingChatNotifications = new Map<string, {
+    timer: NodeJS.Timeout;
+    count: number;
+    lastContent: string;
+    senderName: string;
+    conversationId: string;
+    receiverId: string;
+    senderId: string;
+}>();
+
+/**
+ * Fires the actual push notification after the debounce window closes.
+ * If multiple messages arrived during the window, shows "X new messages".
+ */
+async function fireChatPushNotification(key: string) {
+    const pending = pendingChatNotifications.get(key);
+    if (!pending) return;
+    pendingChatNotifications.delete(key);
+
+    const { receiverId, senderId, senderName, lastContent, count, conversationId } = pending;
+
     try {
         const docRef = adminDb.collection('pushnotification').doc(receiverId);
         const doc = await docRef.get();
         if (!doc.exists) return;
 
         const data = doc.data();
-        const mutedUsers = data?.mutedUsers || [];
-        
-        // --- 1. Mute Check ---
-        if (mutedUsers.includes(senderId)) {
-            console.log(`Notification skipped: User ${receiverId} has muted ${senderId}`);
-            return;
-        }
-
         const tokens = data?.customPushToken || [];
         if (tokens.length === 0) return;
 
-        // --- 2. Build Notification Content ---
-        let body = content;
-        if (!content && mediaType) {
-            body = mediaType === 'image' ? 'Sent an image 📷' : 'Sent a video 📹';
+        // --- Build collapsed body ---
+        let body: string;
+        if (count === 1) {
+            body = lastContent; // Single message: show actual content
+        } else {
+            body = `📬 ${count} new messages`; // Burst: WhatsApp-style collapse
         }
+
+        // --- collapseId ensures same sender's notifications REPLACE each other on the device ---
+        const collapseId = `chat_${senderId}_${receiverId}`;
 
         const messages = tokens.map((token: string) => ({
             to: token,
             title: senderName,
             body: body,
             data: { type: 'MESSAGE', conversationId },
-            channelId: 'urgent', // High priority for messages
-            sound: 'default'
+            channelId: 'urgent',
+            sound: 'default',
+            _id: collapseId, // Expo collapse key — replaces previous notification from same sender
         }));
 
-        // --- 3. Send to Expo API ---
         const response = await fetch('https://exp.host/--/api/v2/push/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -178,7 +209,7 @@ async function sendChatPushNotification(receiverId: string, senderId: string, se
 
         const result = await response.json();
 
-        // --- 4. Cleanup Invalid Tokens ---
+        // --- Cleanup Invalid Tokens ---
         if (result.data) {
             const tokensToRemove: string[] = [];
             result.data.forEach((item: any, index: number) => {
@@ -194,34 +225,287 @@ async function sendChatPushNotification(receiverId: string, senderId: string, se
                 });
             }
         }
+
+        console.log(`📨 Chat push sent to ${receiverId}: "${body}" (${count} msg${count > 1 ? 's' : ''} collapsed)`);
     } catch (error) {
-        // Silently log error as requested
         console.error('Chat notification delivery failed:', error);
     }
 }
+
+async function sendChatPushNotification(receiverId: string, senderId: string, senderName: string, content: string, mediaType: string | null, conversationId: string) {
+    try {
+        // --- 1. Online Check ---
+        if (await isUserOnline(receiverId)) {
+            console.log(`Skipping push for ${receiverId}: user is connected via socket`);
+            return;
+        }
+
+        const docRef = adminDb.collection('pushnotification').doc(receiverId);
+        const doc = await docRef.get();
+        if (!doc.exists) return;
+
+        const data = doc.data();
+
+        // --- 2. Master Push Switch Check ---
+        if (data?.isPushEnabled === false) {
+            console.log(`Skipping push for ${receiverId}: push notifications disabled`);
+            return;
+        }
+
+        // --- 3. Mute Check ---
+        const mutedUsers = data?.mutedUsers || [];
+        if (mutedUsers.includes(senderId)) {
+            console.log(`Notification skipped: User ${receiverId} has muted ${senderId}`);
+            return;
+        }
+
+        const tokens = data?.customPushToken || [];
+        if (tokens.length === 0) return;
+
+        // --- 4. Build content for debounce ---
+        let messageBody = content;
+        if (!content && mediaType) {
+            messageBody = mediaType === 'image' ? 'Sent an image 📷' : 'Sent a video 📹';
+        }
+
+        // --- 5. Debounce: Group burst messages ---
+        const debounceKey = `${senderId}_${receiverId}`;
+        const existing = pendingChatNotifications.get(debounceKey);
+
+        if (existing) {
+            // Another message from same sender within the window — update & reset timer
+            clearTimeout(existing.timer);
+            existing.count += 1;
+            existing.lastContent = messageBody;
+            existing.conversationId = conversationId;
+            existing.timer = setTimeout(() => fireChatPushNotification(debounceKey), CHAT_NOTIFICATION_DEBOUNCE_MS);
+        } else {
+            // First message — start a new debounce window
+            const timer = setTimeout(() => fireChatPushNotification(debounceKey), CHAT_NOTIFICATION_DEBOUNCE_MS);
+            pendingChatNotifications.set(debounceKey, {
+                timer,
+                count: 1,
+                lastContent: messageBody,
+                senderName,
+                conversationId,
+                receiverId,
+                senderId,
+            });
+        }
+    } catch (error) {
+        console.error('Chat notification scheduling failed:', error);
+    }
+}
+// --- Aggregation Constants ---
+const AGGREGATABLE_TYPES = ['like', 'comment', 'follow', 'reply', 'mention'];
+const AGGREGATION_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_ACTORS_IN_ARRAY = 5; // Keep latest 5 actors, rest tracked via actorCount
+
+// --- Like/Follow Push Debounce ---
+const ACTION_NOTIFICATION_DEBOUNCE_MS = 5000; // 5 second window
+const pendingActionNotifications = new Map<string, {
+    timer: NodeJS.Timeout;
+    count: number;
+    latestActorName: string;
+    recipientId: string;
+    type: string;
+    postContent?: string;
+    postId?: string;
+}>();
+
+async function fireActionPushNotification(key: string) {
+    const pending = pendingActionNotifications.get(key);
+    if (!pending) return;
+    pendingActionNotifications.delete(key);
+
+    const { recipientId, type, latestActorName, count, postContent, postId } = pending;
+
+    let title = '';
+    let body = '';
+    let url = `${process.env.NEXT_PUBLIC_BASE_URL}/notifications`;
+
+    const othersText = count > 1 ? ` and ${count - 1} other${count > 2 ? 's' : ''}` : '';
+
+    switch (type) {
+        case 'like':
+            title = `${latestActorName}${othersText} liked your post`;
+            body = postContent ? `"${postContent.substring(0, 50)}..."` : '';
+            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            break;
+        case 'follow':
+            title = `${latestActorName}${othersText} started following you`;
+            body = 'Check out your new followers!';
+            break;
+        case 'comment':
+            title = `${latestActorName}${othersText} commented on your post`;
+            body = postContent ? `"${postContent.substring(0, 50)}..."` : '';
+            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            break;
+        case 'reply':
+            title = `${latestActorName}${othersText} replied to your comment`;
+            body = 'Tap to view the reply.';
+            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            break;
+        case 'mention':
+            title = `${latestActorName}${othersText} mentioned you`;
+            body = 'You were mentioned in a post.';
+            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            break;
+        default:
+            return;
+    }
+
+    await sendPushNotification(recipientId, title, body, url);
+    console.log(`📨 Action push sent to ${recipientId}: "${title}" (${count} action${count > 1 ? 's' : ''} collapsed)`);
+}
+
+function scheduleActionPush(recipientId: string, type: string, actorName: string, postContent?: string, postId?: string) {
+    const debounceKey = `${type}_${recipientId}_${postId || 'global'}`;
+    const existing = pendingActionNotifications.get(debounceKey);
+
+    if (existing) {
+        clearTimeout(existing.timer);
+        existing.count += 1;
+        existing.latestActorName = actorName;
+        existing.timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
+    } else {
+        const timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
+        pendingActionNotifications.set(debounceKey, {
+            timer,
+            count: 1,
+            latestActorName: actorName,
+            recipientId,
+            type,
+            postContent,
+            postId,
+        });
+    }
+}
+
+function computeGroupKey(type: string, notificationData: any): string {
+    switch (type) {
+        case 'like': return `like_${notificationData.post?.id || 'unknown'}`;
+        case 'comment': return `comment_${notificationData.post?.id || 'unknown'}`;
+        case 'reply': return `reply_${notificationData.comment?.id || notificationData.post?.id || 'unknown'}`;
+        case 'mention': return `mention_${notificationData.post?.id || 'unknown'}`;
+        case 'follow': return 'follow';
+        default: return `${type}_${Date.now()}`; // unique key = no aggregation
+    }
+}
+
 async function createNotificationOnServer(notificationData: Omit<Notification, '_id' | 'createdAt' | 'read'>) {
     if (notificationData.recipientId === notificationData.actor.id) {
         return; // Don't notify users of their own actions
     }
     try {
-        const fullNotification = {
-            ...notificationData,
-            createdAt: new Date(),
-            read: false,
+        const now = new Date();
+        const isAggregatable = AGGREGATABLE_TYPES.includes(notificationData.type);
+        const actorEntry = {
+            id: notificationData.actor.id,
+            name: notificationData.actor.name,
+            username: notificationData.actor.username,
+            avatarUrl: notificationData.actor.avatarUrl,
+            actedAt: now,
         };
-        await db.collection('notifications').insertOne(fullNotification);
-        io.to(notificationData.recipientId).emit('new_notification');
-        console.log(`Notification created for ${notificationData.recipientId}`);
 
-        // Trigger push notification for message requests
-        if (notificationData.type === 'message_request') {
-            await sendPushNotification(
+        if (isAggregatable) {
+            const groupKey = computeGroupKey(notificationData.type, notificationData);
+            const windowStart = new Date(now.getTime() - AGGREGATION_WINDOW_MS);
+
+            // Try to find an existing unread group within the time window
+            const existingGroup = await db.collection('notifications').findOne({
+                recipientId: notificationData.recipientId,
+                groupKey: groupKey,
+                read: false,
+                updatedAt: { $gte: windowStart },
+            });
+
+            if (existingGroup) {
+                // Check if this actor already exists in the group (prevent duplicate)
+                const existingActors = existingGroup.actors || [];
+                const actorAlreadyInGroup = existingActors.some((a: any) => a.id === notificationData.actor.id);
+
+                if (actorAlreadyInGroup) {
+                    // Just bump the timestamp, don't add duplicate actor
+                    await db.collection('notifications').updateOne(
+                        { _id: existingGroup._id },
+                        { $set: { updatedAt: now } }
+                    );
+                } else {
+                    // Add new actor to front, cap at MAX_ACTORS_IN_ARRAY
+                    const updatedActors = [actorEntry, ...existingActors].slice(0, MAX_ACTORS_IN_ARRAY);
+
+                    await db.collection('notifications').updateOne(
+                        { _id: existingGroup._id },
+                        {
+                            $set: {
+                                actors: updatedActors,
+                                updatedAt: now,
+                            },
+                            $inc: { actorCount: 1 },
+                        }
+                    );
+                }
+            } else {
+                // Create new grouped notification
+                const groupedNotification = {
+                    recipientId: notificationData.recipientId,
+                    type: notificationData.type,
+                    groupKey: groupKey,
+                    actors: [actorEntry],
+                    actorCount: 1,
+                    // Keep legacy actor field for backward compatibility
+                    actor: notificationData.actor,
+                    ...(notificationData.post && { post: notificationData.post }),
+                    ...(notificationData.comment && { comment: notificationData.comment }),
+                    ...(notificationData.metadata && { metadata: notificationData.metadata }),
+                    read: false,
+                    createdAt: now,
+                    updatedAt: now,
+                };
+                await db.collection('notifications').insertOne(groupedNotification);
+            }
+
+            // Schedule debounced push notification for aggregatable types
+            scheduleActionPush(
                 notificationData.recipientId,
-                'New Message Request',
-                `You have a new message request from ${notificationData.actor.name}.`,
-                `${process.env.NEXT_PUBLIC_BASE_URL}/messages/requests`
+                notificationData.type,
+                notificationData.actor.name,
+                notificationData.post?.content,
+                notificationData.post?.id
             );
+
+        } else {
+            // Non-aggregatable: insert as individual notification (with actors array for consistency)
+            const fullNotification = {
+                recipientId: notificationData.recipientId,
+                type: notificationData.type,
+                groupKey: `${notificationData.type}_${Date.now()}`,
+                actors: [actorEntry],
+                actorCount: 1,
+                actor: notificationData.actor,
+                ...(notificationData.post && { post: notificationData.post }),
+                ...(notificationData.comment && { comment: notificationData.comment }),
+                ...(notificationData.metadata && { metadata: notificationData.metadata }),
+                read: false,
+                createdAt: now,
+                updatedAt: now,
+            };
+            await db.collection('notifications').insertOne(fullNotification);
+
+            // Trigger push notification immediately for non-aggregatable types
+            if (notificationData.type === 'message_request') {
+                await sendPushNotification(
+                    notificationData.recipientId,
+                    'New Message Request',
+                    `You have a new message request from ${notificationData.actor.name}.`,
+                    `${process.env.NEXT_PUBLIC_BASE_URL}/messages/requests`
+                );
+            }
         }
+
+        io.to(notificationData.recipientId).emit('new_notification');
+        console.log(`Notification created/updated for ${notificationData.recipientId} [${notificationData.type}]`);
 
     } catch (error) {
         console.error("Failed to create notification in MongoDB", error);
@@ -641,8 +925,8 @@ app.get('/api/notifications/:userId', async (req: express.Request, res: express.
         const { userId } = req.params;
         const notifications = await db.collection('notifications')
             .find({ recipientId: userId })
-            .sort({ createdAt: -1 })
-            .limit(50)
+            .sort({ updatedAt: -1, createdAt: -1 })
+            .limit(30)
             .toArray();
         res.status(200).json(notifications);
     } catch (error) {
@@ -1219,6 +1503,33 @@ io.on('connection', (socket) => {
         console.log(`User disconnected: ${socket.id}`);
     });
 });
+
+
+// --- Notification Cleanup Cron Job ---
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
+const NOTIFICATION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+async function cleanupOldNotifications() {
+    try {
+        const cutoffDate = new Date(Date.now() - NOTIFICATION_MAX_AGE_MS);
+        const result = await db.collection('notifications').deleteMany({
+            read: true,
+            createdAt: { $lt: cutoffDate },
+        });
+        if (result.deletedCount > 0) {
+            console.log(`🧹 Cleanup: Deleted ${result.deletedCount} old read notifications (older than 30 days)`);
+        }
+    } catch (error) {
+        console.error('Notification cleanup failed:', error);
+    }
+}
+
+// Run cleanup on startup (after a short delay to ensure DB is connected) and then every 6 hours
+setTimeout(() => {
+    cleanupOldNotifications();
+    setInterval(cleanupOldNotifications, CLEANUP_INTERVAL_MS);
+    console.log('🕐 Notification cleanup cron started (every 6 hours, deletes 30-day old read notifications)');
+}, 10000);
 
 
 const PORT = process.env.PORT || 3001;
