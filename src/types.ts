@@ -224,6 +224,7 @@ export type Conversation = {
   createdAt: Date;
   updatedAt: Date;
   unreadCount?: number;
+  deletedFor?: string[];
 }
 
 export type Message = {
@@ -237,6 +238,14 @@ export type Message = {
   readBy: string[];
   reactions: { [emoji: string]: string[] };
   deletedFor: string[];
+    replyTo?: {
+        _id: string;
+        content: string;
+        senderId: string;
+        senderName?: string;
+        mediaUrl?: string | null;
+        mediaType?: 'image' | 'video' | null;
+    } | null;
 }
 
 export type MessageRequest = {
