@@ -38,6 +38,7 @@ export type User = {
   referredBy?: string | null; // UID of the user who referred them
   totalReferralPoints?: number;
   postCount?: number;
+  totalTippedAmount?: number;
   lastSeen?: string;
   interests?: string[];
   language?: 'en' | 'hi';
@@ -99,6 +100,7 @@ export type Post = {
   };
   hashtags?: string[];
   category?: string; // AI-generated category
+  hasVideo?: boolean; // Fast filtering for Reels/Videos
   mentions?: string[];
   originalLang?: string; // Detected language code, e.g. "hi", "en"
   translations?: { [langCode: string]: string }; // Cached translations, e.g. { en: "...", hi: "..." }
@@ -173,10 +175,23 @@ export type ReportedUser = User & {
 };
 
 
+export type NotificationActor = {
+  id: string;
+  name: string;
+  username: string;
+  avatarUrl?: string;
+  actedAt?: Date;
+};
+
 export type Notification = {
   _id: string;
   recipientId: string;
   type: 'like' | 'comment' | 'follow' | 'message_request' | 'fund_deposit' | 'withdrawal_approved' | 'withdrawal_cancelled' | 'tip' | 'reply' | 'mention' | 'order_completed' | 'order_cancelled' | 'referral_commission';
+  groupKey?: string;
+  // Grouped notification fields
+  actors?: NotificationActor[];
+  actorCount?: number;
+  // Legacy single actor (backward compat)
   actor: {
     id: string;
     name: string;
@@ -198,6 +213,7 @@ export type Notification = {
   };
   read: boolean;
   createdAt: Date;
+  updatedAt?: Date;
 }
 
 export type Conversation = {
@@ -208,7 +224,6 @@ export type Conversation = {
   createdAt: Date;
   updatedAt: Date;
   unreadCount?: number;
-  deletedFor?: string[];
 }
 
 export type Message = {
@@ -222,14 +237,6 @@ export type Message = {
   readBy: string[];
   reactions: { [emoji: string]: string[] };
   deletedFor: string[];
-  replyTo?: {
-        _id: string;
-        content: string;
-        senderId: string;
-        senderName?: string;
-        mediaUrl?: string | null;
-        mediaType?: 'image' | 'video' | null;
-    } | null;
 }
 
 export type MessageRequest = {
@@ -449,6 +456,18 @@ export type Product = {
   appUrl?: string; // Optional URL for virtual products linked to an app
 };
 
+export type AffiliateProduct = {
+  id: string;
+  ownerId: string;
+  shortId: string;
+  name: string;
+  url: string;
+  imageUrl: string;
+  description: string;
+  clicks: number;
+  createdAt: string;
+};
+
 export type DeliveryDetails = {
   fullName: string;
   phone: string;
@@ -609,6 +628,7 @@ export type PayPost = {
   dislikes: string[];
   commentsCount: number;
   isLocked?: boolean;
+  thumbnailUrl?: string;
 };
 
 
@@ -621,6 +641,7 @@ export type DraftPayPost = {
   price: number;
   createdAt: string;
   updatedAt?: string;
+  thumbnailUrl?: string;
 };
 
 export type Appeal = {
