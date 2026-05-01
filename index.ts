@@ -9,9 +9,34 @@ import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
 import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast, Transaction, Deposit } from './src/types';
 import dotenv from 'dotenv';
 import { FieldValue } from 'firebase-admin/firestore';
+import admin from 'firebase-admin';
 
 dotenv.config();
 initializeFirebaseAdmin();
+
+// --- Secondary Firebase App for Notifications ---
+let notificationApp: admin.app.App;
+const secondaryBase64 = process.env.SECONDARY_FIREBASE_SERVICE_ACCOUNT_BASE64;
+
+if (secondaryBase64) {
+    try {
+        const existingApp = admin.apps.find(app => app?.name === 'notificationApp');
+        if (existingApp) {
+            notificationApp = existingApp;
+        } else {
+            const serviceAccount = JSON.parse(Buffer.from(secondaryBase64, 'base64').toString('utf8'));
+            notificationApp = admin.initializeApp({
+                credential: admin.credential.cert(serviceAccount)
+            }, 'notificationApp');
+            console.log("✅ Secondary Firebase App (Notifications) initialized.");
+        }
+    } catch (error) {
+        console.error("❌ Failed to initialize secondary Firebase app for notifications:", error);
+        notificationApp = admin.app(); // Fallback to default
+    }
+} else {
+    notificationApp = admin.app(); // Use default if no secondary provided
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -24,6 +49,9 @@ const allowedOrigins = [
     "https://api.minepi.com",
     "https://connectpi.in",
     "https://*.connectpi.in",
+    "https://www.connectpi.in",
+    "https://pi.connectpi.in",
+    "https://app.connectpi.in",
     "http://localhost:9002"
 ];
 
@@ -109,31 +137,79 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
     }
 }
 
-async function sendPushNotification(userId: string, title: string, body: string, url: string) {
+async function sendPushNotification(userId: string, title: string, body: string, url: string, type?: string) {
     try {
         const docRef = adminDb.collection('pushnotification').doc(userId);
         const doc = await docRef.get();
         if (!doc.exists) return;
 
         const data = doc.data();
-        const tokens = data?.customPushToken || [];
+        const fcmTokenField = data?.fcmToken;
+        const tokens: string[] = Array.isArray(fcmTokenField) 
+            ? fcmTokenField 
+            : (fcmTokenField ? [fcmTokenField] : []);
+            
         if (tokens.length === 0) return;
 
-        const messages = tokens.map((token: string) => ({
-            to: token,
-            title,
-            body,
-            data: { url },
-            channelId: 'default'
-        }));
+        // --- Sound & Vibration Rules ---
+        let sound: string | undefined = 'default';
+        let vibrateTimings: number[] | undefined = undefined;
 
-        await fetch('https://exp.host/--/api/v2/push/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(messages),
-        });
+        if (type === 'like') {
+            sound = undefined; // Silent
+        } else if (type === 'reply') {
+            vibrateTimings = [0, 500, 500, 500]; // Sound + Vibration
+        }
+
+        const message = {
+            notification: {
+                title,
+                body,
+            },
+            data: { url, type: type || 'general' },
+            android: {
+                notification: {
+                    sound,
+                    vibrateTimingsMillis: vibrateTimings,
+                    priority: (type === 'reply' || type === 'message_request') ? 'high' : 'default' as any,
+                },
+            },
+            apns: {
+                payload: {
+                    aps: {
+                        sound,
+                    },
+                },
+            },
+            tokens: tokens,
+        };
+
+        const response = await notificationApp.messaging().sendEachForMulticast(message);
+
+        // --- Cleanup Invalid Tokens ---
+        if (response.failureCount > 0) {
+            const tokensToRemove: string[] = [];
+            response.responses.forEach((resp, idx) => {
+                if (!resp.success && resp.error) {
+                    const errorCode = resp.error.code;
+                    if (errorCode === 'messaging/registration-token-not-registered' || 
+                        errorCode === 'messaging/invalid-registration-token') {
+                        tokensToRemove.push(tokens[idx]);
+                    }
+                }
+            });
+
+            if (tokensToRemove.length > 0) {
+                console.log(`Removing ${tokensToRemove.length} inactive FCM tokens for user ${userId}`);
+                await docRef.update({
+                    fcmToken: FieldValue.arrayRemove(...tokensToRemove)
+                });
+            }
+        }
+        
+        console.log(`📨 FCM push sent to ${userId}: "${title}" (Success: ${response.successCount}, Fail: ${response.failureCount})`);
     } catch (error) {
-        console.error(`Failed to send push notification to ${userId}:`, error);
+        console.error(`Failed to send FCM notification to ${userId}:`, error);
     }
 }
 
@@ -233,6 +309,8 @@ async function fireChatPushNotification(key: string) {
 }
 
 async function sendChatPushNotification(receiverId: string, senderId: string, senderName: string, content: string, mediaType: string | null, conversationId: string) {
+    /* 
+    // Temporarily disabled chat push notifications
     try {
         // --- 1. Online Check ---
         if (await isUserOnline(receiverId)) {
@@ -295,6 +373,7 @@ async function sendChatPushNotification(receiverId: string, senderId: string, se
     } catch (error) {
         console.error('Chat notification scheduling failed:', error);
     }
+    */
 }
 // --- Aggregation Constants ---
 const AGGREGATABLE_TYPES = ['like', 'comment', 'follow', 'reply', 'mention'];
@@ -355,7 +434,7 @@ async function fireActionPushNotification(key: string) {
             return;
     }
 
-    await sendPushNotification(recipientId, title, body, url);
+    await sendPushNotification(recipientId, title, body, url, type);
     console.log(`📨 Action push sent to ${recipientId}: "${title}" (${count} action${count > 1 ? 's' : ''} collapsed)`);
 }
 
@@ -494,14 +573,17 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
             await db.collection('notifications').insertOne(fullNotification);
 
             // Trigger push notification immediately for non-aggregatable types
+            /* 
             if (notificationData.type === 'message_request') {
                 await sendPushNotification(
                     notificationData.recipientId,
                     'New Message Request',
                     `You have a new message request from ${notificationData.actor.name}.`,
-                    `${process.env.NEXT_PUBLIC_BASE_URL}/messages/requests`
+                    `${process.env.NEXT_PUBLIC_BASE_URL}/messages/requests`,
+                    'message_request'
                 );
             }
+            */
         }
 
         io.to(notificationData.recipientId).emit('new_notification');
