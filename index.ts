@@ -6,6 +6,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import { MongoClient, ObjectId, Db } from 'mongodb';
 import { initializeFirebaseAdmin, adminDb } from './src/firebase-admin';
+import { subscriptionRouter } from './src/subscriptionRoutes';
 import type { User, Conversation, Message, MessageRequest, PaymentDto, DonationDto, Notification, Broadcast, Transaction, Deposit } from './src/types';
 import dotenv from 'dotenv';
 import { FieldValue } from 'firebase-admin/firestore';
@@ -50,6 +51,7 @@ const allowedOrigins = [
     "https://connectpi.in",
     "https://*.connectpi.in",
     "https://www.connectpi.in",
+    "https://api.connectpi.in",
     "https://pi.connectpi.in",
     "https://app.connectpi.in",
     "http://localhost:9002"
@@ -68,6 +70,7 @@ const io = new Server(server, {
 
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use('/api/subscriptions', subscriptionRouter);
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/piconnect';
 let db: Db;
@@ -137,7 +140,7 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
     }
 }
 
-async function sendPushNotification(userId: string, title: string, body: string, url: string, type?: string) {
+async function sendPushNotification(userId: string, title: string, body: string, url: string, type?: string, avatar?: string, image?: string, extraData: any = {}) {
     try {
         const docRef = adminDb.collection('pushnotification').doc(userId);
         const doc = await docRef.get();
@@ -165,21 +168,33 @@ async function sendPushNotification(userId: string, title: string, body: string,
             notification: {
                 title,
                 body,
+                imageUrl: image || undefined,
             },
-            data: { url, type: type || 'general' },
+            data: { 
+                url, 
+                type: type || 'general',
+                avatar: avatar || '',
+                image: image || '',
+                ...extraData
+            },
             android: {
                 notification: {
                     sound,
                     vibrateTimingsMillis: vibrateTimings,
                     priority: (type === 'reply' || type === 'message_request') ? 'high' : 'default' as any,
+                    imageUrl: image || undefined,
                 },
             },
             apns: {
                 payload: {
                     aps: {
                         sound,
+                        mutableContent: true,
                     },
                 },
+                fcm_options: {
+                    image: image || undefined,
+                }
             },
             tokens: tokens,
         };
@@ -210,6 +225,40 @@ async function sendPushNotification(userId: string, title: string, body: string,
         console.log(`📨 FCM push sent to ${userId}: "${title}" (Success: ${response.successCount}, Fail: ${response.failureCount})`);
     } catch (error) {
         console.error(`Failed to send FCM notification to ${userId}:`, error);
+    }
+}
+
+// --- Expo Push Notification (For Follows) ---
+async function sendExpoPushNotification(userId: string, title: string, body: string, data: any, avatar?: string) {
+    try {
+        const docRef = adminDb.collection('pushnotification').doc(userId);
+        const doc = await docRef.get();
+        if (!doc.exists) return;
+
+        const tokens = doc.data()?.customPushToken || [];
+        if (tokens.length === 0) return;
+
+        const messages = tokens.map((token: string) => ({
+            to: token,
+            title,
+            body,
+            data: { ...data, avatar },
+            sound: 'default',
+            channelId: 'urgent',
+        }));
+
+        await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Accept-encoding': 'gzip, deflate',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(messages),
+        });
+        console.log(`🚀 Expo Push sent to ${userId}: "${title}"`);
+    } catch (error) {
+        console.error("Expo Push Error:", error);
     }
 }
 
@@ -386,6 +435,8 @@ const pendingActionNotifications = new Map<string, {
     timer: NodeJS.Timeout;
     count: number;
     latestActorName: string;
+    latestActorUsername?: string;
+    latestActorAvatar?: string;
     recipientId: string;
     type: string;
     postContent?: string;
@@ -397,7 +448,7 @@ async function fireActionPushNotification(key: string) {
     if (!pending) return;
     pendingActionNotifications.delete(key);
 
-    const { recipientId, type, latestActorName, count, postContent, postId } = pending;
+    const { recipientId, type, latestActorName, latestActorUsername, latestActorAvatar, count, postContent, postId } = pending;
 
     let title = '';
     let body = '';
@@ -434,11 +485,17 @@ async function fireActionPushNotification(key: string) {
             return;
     }
 
-    await sendPushNotification(recipientId, title, body, url, type);
+    if (type === 'follow') {
+        // Use Expo for Follows
+        await sendExpoPushNotification(recipientId, title, body, { url, type, username: latestActorUsername }, latestActorAvatar);
+    } else {
+        // Use FCM for others (Like, Comment, etc.)
+        await sendPushNotification(recipientId, title, body, url, type, latestActorAvatar, undefined, { postId });
+    }
     console.log(`📨 Action push sent to ${recipientId}: "${title}" (${count} action${count > 1 ? 's' : ''} collapsed)`);
 }
 
-function scheduleActionPush(recipientId: string, type: string, actorName: string, postContent?: string, postId?: string) {
+function scheduleActionPush(recipientId: string, type: string, actorName: string, actorUsername?: string, actorAvatar?: string, postContent?: string, postId?: string) {
     const debounceKey = `${type}_${recipientId}_${postId || 'global'}`;
     const existing = pendingActionNotifications.get(debounceKey);
 
@@ -446,6 +503,8 @@ function scheduleActionPush(recipientId: string, type: string, actorName: string
         clearTimeout(existing.timer);
         existing.count += 1;
         existing.latestActorName = actorName;
+        existing.latestActorUsername = actorUsername;
+        existing.latestActorAvatar = actorAvatar;
         existing.timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
     } else {
         const timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
@@ -453,6 +512,8 @@ function scheduleActionPush(recipientId: string, type: string, actorName: string
             timer,
             count: 1,
             latestActorName: actorName,
+            latestActorUsername: actorUsername,
+            latestActorAvatar: actorAvatar,
             recipientId,
             type,
             postContent,
@@ -550,6 +611,8 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
                 notificationData.recipientId,
                 notificationData.type,
                 notificationData.actor.name,
+                notificationData.actor.username,
+                notificationData.actor.avatarUrl,
                 notificationData.post?.content,
                 notificationData.post?.id
             );
