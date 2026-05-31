@@ -1,4 +1,5 @@
 import express from 'express';
+import admin from 'firebase-admin';
 import { adminDb } from './firebase-admin';
 
 export const subscriptionRouter = express.Router();
@@ -8,7 +9,7 @@ export const subscriptionRouter = express.Router();
  * 
  * Check if the user has an active app ad-free subscription.
  * Verifies if the 'adFreeActiveUntil' timestamp inside 'adfree_subscriptions'
- * collection is in the future.
+ * collection is in the future. Handles VIP tier checking and self-healing authority syncing.
  */
 subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Response) => {
   try {
@@ -21,10 +22,12 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
     const docSnap = await docRef.get();
     let localActive = false;
     let localExpiry = null;
+    let tier = 'standard';
 
     if (docSnap.exists) {
       const data = docSnap.data();
       localExpiry = data?.adFreeActiveUntil;
+      tier = data?.tier || 'standard';
 
       if (localExpiry) {
         const expiryDate = new Date(localExpiry);
@@ -32,15 +35,65 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
         
         // If local database confirms user is active, return immediately for speed
         if (localActive) {
+          // --- SELF-HEALING SYNC ---
+          // Ensure user's primary account authority and verifiedReson fields are synced!
+          try {
+            const userRef = adminDb.collection('users').doc(userId);
+            const userDoc = await userRef.get();
+            if (userDoc.exists) {
+              const userData = userDoc.data();
+              if (tier === 'vip') {
+                if (userData?.authority !== 'verified' || userData?.verifiedReson !== 'Verified by subscription') {
+                  console.log(`[SubscriptionAPI] Self-healing authority for VIP user ${userId}...`);
+                  await userRef.update({
+                    authority: 'verified',
+                    verifiedReson: 'Verified by subscription'
+                  });
+                }
+              } else {
+                // If tier is standard but they still have "verified" with "Verified by subscription", revert it
+                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+                  console.log(`[SubscriptionAPI] Self-healing reverting authority for Standard user ${userId}...`);
+                  await userRef.update({
+                    authority: 'user',
+                    verifiedReson: admin.firestore.FieldValue.delete()
+                  });
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[SubscriptionAPI] Self-healing user document sync failed:', e);
+          }
+
           return res.status(200).json({ 
             active: true, 
+            tier,
             adFreeActiveUntil: localExpiry 
           });
         }
       }
     }
 
-    // --- SELF-HEALING SYNC ---
+    // --- SELF-HEALING SYNC FOR EXPIRED VIP USERS ---
+    // If expired/inactive, ensure authority is reverted ONLY if it was "Verified by subscription"
+    try {
+      const userRef = adminDb.collection('users').doc(userId);
+      const userDoc = await userRef.get();
+      if (userDoc.exists) {
+        const userData = userDoc.data();
+        if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+          console.log(`[SubscriptionAPI] Reverting expired VIP user ${userId} to standard user...`);
+          await userRef.update({
+            authority: 'user',
+            verifiedReson: admin.firestore.FieldValue.delete()
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[SubscriptionAPI] Error reverting expired VIP user authority:', e);
+    }
+
+    // --- SELF-HEALING SYNC WITH REVENUECAT ---
     // If local Firestore says expired/inactive OR does not exist, we do a live check
     // with RevenueCat as a fail-safe backup (in case a webhook renewal failed to process).
     const secretKey = process.env.REVENUECAT_SECRET_KEY;
@@ -57,23 +110,48 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
 
         if (rcRes.ok) {
           const rcData = await rcRes.json();
-          const entitlement = rcData?.subscriber?.entitlements?.adfree_access;
+          const standardEntitlement = rcData?.subscriber?.entitlements?.adfree_access;
+          const vipEntitlement = rcData?.subscriber?.entitlements?.vip_verified_access;
+          
+          const activeEntitlement = vipEntitlement || standardEntitlement;
+          const liveTier = vipEntitlement ? 'vip' : 'standard';
 
-          if (entitlement) {
-            const expiresDate = entitlement.expires_date;
+          if (activeEntitlement) {
+            const expiresDate = activeEntitlement.expires_date;
             if (expiresDate && new Date(expiresDate).getTime() > Date.now()) {
               // Self-heal: update Firestore with the verified active status
               await docRef.set({
                 userId,
+                tier: liveTier,
                 adFreeActiveUntil: expiresDate,
                 isActive: true,
                 updatedAt: new Date().toISOString(),
                 lastSyncEvent: 'SELF_HEALING_GET'
               }, { merge: true });
 
-              console.log(`[SubscriptionAPI] Self-healing successful! Restored active status for user ${userId} until ${expiresDate}`);
+              const userRef = adminDb.collection('users').doc(userId);
+              const userDoc = await userRef.get();
+              const userData = userDoc.exists ? userDoc.data() : null;
+
+              if (liveTier === 'vip') {
+                await userRef.update({
+                  authority: 'verified',
+                  verifiedReson: 'Verified by subscription'
+                });
+              } else {
+                // Revert ONLY if their existing reason is 'Verified by subscription'
+                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+                  await userRef.update({
+                    authority: 'user',
+                    verifiedReson: admin.firestore.FieldValue.delete()
+                  });
+                }
+              }
+
+              console.log(`[SubscriptionAPI] Self-healing successful! Restored active ${liveTier} status for user ${userId} until ${expiresDate}`);
               return res.status(200).json({ 
                 active: true, 
+                tier: liveTier,
                 adFreeActiveUntil: expiresDate 
               });
             }
@@ -121,23 +199,53 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
 
       if (rcRes.ok) {
         const rcData = await rcRes.json();
-        const entitlement = rcData?.subscriber?.entitlements?.adfree_access;
+        const standardEntitlement = rcData?.subscriber?.entitlements?.adfree_access;
+        const vipEntitlement = rcData?.subscriber?.entitlements?.vip_verified_access;
+        
+        const activeEntitlement = vipEntitlement || standardEntitlement;
+        const tier = vipEntitlement ? 'vip' : 'standard';
 
         // Check if the entitlement exists and its expiration date is in the future
-        if (entitlement) {
-          const expiresDate = entitlement.expires_date;
+        if (activeEntitlement) {
+          const expiresDate = activeEntitlement.expires_date;
           if (expiresDate && new Date(expiresDate).getTime() > Date.now()) {
-            // Update Firestore with verified data
-            await adminDb.collection('adfree_subscriptions').doc(userId).set({
+            const batch = adminDb.batch();
+            
+            // 1. Update subscription doc
+            const subRef = adminDb.collection('adfree_subscriptions').doc(userId);
+            batch.set(subRef, {
               userId,
+              tier,
               adFreeActiveUntil: expiresDate,
               isActive: true,
               updatedAt: new Date().toISOString(),
               purchaseDetails: { packageId, transactionId }
             });
 
-            console.log(`[SubscriptionAPI] Securely verified and activated subscription for ${userId} until ${expiresDate}`);
-            return res.status(200).json({ success: true, adFreeActiveUntil: expiresDate });
+            // 2. Update user doc (Strict Safety Check)
+            const userRef = adminDb.collection('users').doc(userId);
+            const userSnap = await userRef.get();
+            const userData = userSnap.exists ? userSnap.data() : null;
+
+            if (tier === 'vip') {
+              batch.update(userRef, { 
+                authority: 'verified', 
+                verifiedReson: 'Verified by subscription' 
+              });
+            } else {
+              // Revert ONLY if their existing reason is 'Verified by subscription'
+              if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+                batch.update(userRef, { 
+                  authority: 'user', 
+                  verifiedReson: admin.firestore.FieldValue.delete() 
+                });
+              }
+            }
+
+            await batch.commit();
+
+            console.log(`[SubscriptionAPI] Securely verified and activated ${tier} subscription for ${userId} until ${expiresDate}`);
+            return res.status(200).json({ success: true, tier, adFreeActiveUntil: expiresDate });
           }
         }
         console.warn(`[SubscriptionAPI] Security alert: User ${userId} attempted activate API, but entitlement was missing or expired in RevenueCat.`);
@@ -152,17 +260,46 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
     // --- Dev Mode Fallback (If Secret Key is not configured yet in .env) ---
     const thirtyDaysInMs = 30 * 24 * 60 * 60 * 1000;
     const expiryDateStr = new Date(Date.now() + thirtyDaysInMs).toISOString();
+    
+    // Check if the sandbox package is the VIP plan
+    const isVipPackage = packageId?.includes('verified') || packageId?.includes('vip');
+    const tier = isVipPackage ? 'vip' : 'standard';
 
-    await adminDb.collection('adfree_subscriptions').doc(userId).set({
+    const batch = adminDb.batch();
+    const subRef = adminDb.collection('adfree_subscriptions').doc(userId);
+    batch.set(subRef, {
       userId,
+      tier,
       adFreeActiveUntil: expiryDateStr,
       isActive: true,
       updatedAt: new Date().toISOString(),
       purchaseDetails: { packageId, transactionId }
     });
 
+    const userRef = adminDb.collection('users').doc(userId);
+    const userSnap = await userRef.get();
+    const userData = userSnap.exists ? userSnap.data() : null;
+
+    if (tier === 'vip') {
+      batch.update(userRef, { 
+        authority: 'verified', 
+        verifiedReson: 'Verified by subscription' 
+      });
+    } else {
+      // Revert ONLY if their existing reason is 'Verified by subscription'
+      if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+        batch.update(userRef, { 
+          authority: 'user', 
+          verifiedReson: admin.firestore.FieldValue.delete() 
+        });
+      }
+    }
+
+    await batch.commit();
+
     return res.status(200).json({ 
       success: true, 
+      tier,
       adFreeActiveUntil: expiryDateStr 
     });
   } catch (error) {
@@ -176,7 +313,7 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
  * 
  * Secure Webhook endpoint for RevenueCat.
  * Receives real-time subscription lifecycle events (INITIAL_PURCHASE, RENEWAL, CANCELLATION, EXPIRATION, etc.).
- * Handles automatic renewals, refunds, and cancellations instantly in the database.
+ * Handles automatic renewals, refunds, upgrades, and cancellations instantly in the database.
  */
 subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Response) => {
   try {
@@ -196,14 +333,21 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
 
     const { type, app_user_id, entitlement_ids, expiration_at_ms } = event;
     
-    // Ensure the event relates to our ad-free entitlement
-    if (!entitlement_ids || !entitlement_ids.includes('adfree_access')) {
-      return res.status(200).json({ received: true, message: 'Event not related to adfree_access' });
+    // Ensure the event relates to our standard or VIP subscription
+    const hasAdFree = entitlement_ids && entitlement_ids.includes('adfree_access');
+    const hasVip = entitlement_ids && entitlement_ids.includes('vip_verified_access');
+
+    if (!hasAdFree && !hasVip) {
+      return res.status(200).json({ received: true, message: 'Event not related to adfree_access or vip_verified_access' });
     }
 
     console.log(`[SubscriptionAPI Webhook] Event received: ${type} for user: ${app_user_id}`);
 
     const docRef = adminDb.collection('adfree_subscriptions').doc(app_user_id);
+    const userRef = adminDb.collection('users').doc(app_user_id);
+    const userSnap = await userRef.get();
+    const userData = userSnap.exists ? userSnap.data() : null;
+    const tier = hasVip ? 'vip' : 'standard';
 
     switch (type) {
       case 'TRANSFER':
@@ -212,12 +356,29 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
           const expiryDateStr = new Date(expiration_at_ms).toISOString();
           await docRef.set({
             userId: app_user_id,
+            tier,
             adFreeActiveUntil: expiryDateStr,
             isActive: true,
             updatedAt: new Date().toISOString(),
             lastWebhookEvent: type
           }, { merge: true });
-          console.log(`[SubscriptionAPI Webhook] Transferred premium active status to new user ${app_user_id} until ${expiryDateStr}`);
+
+          if (tier === 'vip') {
+            await userRef.update({
+              authority: 'verified',
+              verifiedReson: 'Verified by subscription'
+            });
+          } else {
+            // Revert ONLY if their existing reason is 'Verified by subscription'
+            if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+              await userRef.update({
+                authority: 'user',
+                verifiedReson: admin.firestore.FieldValue.delete()
+              });
+            }
+          }
+
+          console.log(`[SubscriptionAPI Webhook] Transferred active ${tier} status to user ${app_user_id} until ${expiryDateStr}`);
         }
 
         // 2. Revoke premium status instantly from the old user(s) (Account A)
@@ -230,6 +391,17 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
               updatedAt: new Date().toISOString(),
               lastWebhookEvent: 'REVOKED_BY_TRANSFER'
             }, { merge: true });
+
+            const oldUserRef = adminDb.collection('users').doc(oldUserId);
+            const oldUserSnap = await oldUserRef.get();
+            const oldUserData = oldUserSnap.exists ? oldUserSnap.data() : null;
+
+            if (oldUserData?.authority === 'verified' && oldUserData?.verifiedReson === 'Verified by subscription') {
+              await oldUserRef.update({
+                authority: 'user',
+                verifiedReson: admin.firestore.FieldValue.delete()
+              });
+            }
             console.log(`[SubscriptionAPI Webhook] Revoked premium access from transferred user ${oldUserId}`);
           }
         }
@@ -237,45 +409,78 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
 
       case 'INITIAL_PURCHASE':
       case 'RENEWAL':
-      case 'UNCANCELLATION': // User resumed their subscription before expiry
+      case 'PRODUCT_CHANGE': // Upgrade/Downgrade event natively supported
+      case 'UNCANCELLATION': // User resumed subscription
         if (expiration_at_ms) {
           const expiryDateStr = new Date(expiration_at_ms).toISOString();
           await docRef.set({
             userId: app_user_id,
+            tier,
             adFreeActiveUntil: expiryDateStr,
             isActive: true,
             updatedAt: new Date().toISOString(),
             lastWebhookEvent: type
           }, { merge: true });
 
-          console.log(`[SubscriptionAPI Webhook] Updated user ${app_user_id} active status until ${expiryDateStr} (Reason: ${type})`);
+          if (tier === 'vip') {
+            await userRef.update({
+              authority: 'verified',
+              verifiedReson: 'Verified by subscription'
+            });
+          } else {
+            // Revert ONLY if their existing reason is 'Verified by subscription'
+            if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+              await userRef.update({
+                authority: 'user',
+                verifiedReson: admin.firestore.FieldValue.delete()
+              });
+            }
+          }
+
+          console.log(`[SubscriptionAPI Webhook] Updated user ${app_user_id} active ${tier} status until ${expiryDateStr} (Reason: ${type})`);
         }
         break;
 
       case 'CANCELLATION':
       case 'EXPIRATION':
       case 'BILLING_ISSUE':
-        // Mark as inactive or let expiry date naturally handle it. De-activating is the safest!
         if (expiration_at_ms) {
           const expiryDateStr = new Date(expiration_at_ms).toISOString();
+          const isStillActive = new Date(expiration_at_ms).getTime() > Date.now();
+
           await docRef.set({
             adFreeActiveUntil: expiryDateStr,
-            isActive: new Date(expiration_at_ms).getTime() > Date.now(),
+            isActive: isStillActive,
             updatedAt: new Date().toISOString(),
             lastWebhookEvent: type
           }, { merge: true });
+
+          if (!isStillActive) {
+            if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+              await userRef.update({
+                authority: 'user',
+                verifiedReson: admin.firestore.FieldValue.delete()
+              });
+            }
+          }
         } else {
           await docRef.set({
             isActive: false,
             updatedAt: new Date().toISOString(),
             lastWebhookEvent: type
           }, { merge: true });
+
+          if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+            await userRef.update({
+              authority: 'user',
+              verifiedReson: admin.firestore.FieldValue.delete()
+            });
+          }
         }
         console.log(`[SubscriptionAPI Webhook] Updated user ${app_user_id} cancellation/expiration status (Reason: ${type})`);
         break;
 
       default:
-        // Other events (TRANSFER, PRODUCT_CHANGE, etc.)
         break;
     }
 
