@@ -181,6 +181,7 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
 subscriptionRouter.post('/activate', async (req: express.Request, res: express.Response) => {
   try {
     const { userId, packageId, transactionId } = req.body;
+    console.log("[SubscriptionAPI Debug] Received activate request from App:", { userId, packageId, transactionId });
 
     if (!userId) {
       return res.status(400).json({ error: 'User ID is required.' });
@@ -201,6 +202,8 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
 
       if (rcRes.ok) {
         const rcData = await rcRes.json();
+        console.log(`[SubscriptionAPI Debug] RevenueCat API Response for user ${userId}:`, JSON.stringify(rcData, null, 2));
+        
         const standardEntitlement = rcData?.subscriber?.entitlements?.adfree_access;
         const vipEntitlement = rcData?.subscriber?.entitlements?.vip_verified_access;
         
@@ -255,7 +258,8 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
         console.warn(`[SubscriptionAPI] Security alert: User ${userId} attempted activate API, but entitlement was missing or expired in RevenueCat.`);
         return res.status(403).json({ error: 'Purchase verification failed: active entitlement not found.' });
       } else {
-        console.error(`[SubscriptionAPI] RevenueCat API responded with status ${rcRes.status}`);
+        const errText = await rcRes.text().catch(() => '');
+        console.error(`[SubscriptionAPI] RevenueCat API responded with status ${rcRes.status}. Error body: ${errText}`);
       }
     } else {
       console.warn('[SubscriptionAPI] WARNING: REVENUECAT_SECRET_KEY not set in .env. Falling back to client-trusted calculation (DEV MODE ONLY).');
@@ -323,6 +327,8 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
  */
 subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Response) => {
   try {
+    console.log("[SubscriptionAPI Webhook Debug] Received webhook payload:", JSON.stringify(req.body, null, 2));
+
     const webhookToken = process.env.REVENUECAT_WEBHOOK_TOKEN;
     const authHeader = req.headers.authorization;
 
