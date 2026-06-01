@@ -113,8 +113,21 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
           const standardEntitlement = rcData?.subscriber?.entitlements?.adfree_access;
           const vipEntitlement = rcData?.subscriber?.entitlements?.vip_verified_access;
           
-          const activeEntitlement = vipEntitlement || standardEntitlement;
-          const liveTier = vipEntitlement ? 'vip' : 'standard';
+          // Select the entitlement that is actually active in the future
+          let activeEntitlement = null;
+          let liveTier = 'standard';
+
+          const nowMs = Date.now();
+          const isVipActive = vipEntitlement && vipEntitlement.expires_date && (new Date(vipEntitlement.expires_date).getTime() > nowMs);
+          const isStandardActive = standardEntitlement && standardEntitlement.expires_date && (new Date(standardEntitlement.expires_date).getTime() > nowMs);
+
+          if (isVipActive) {
+            activeEntitlement = vipEntitlement;
+            liveTier = 'vip';
+          } else if (isStandardActive) {
+            activeEntitlement = standardEntitlement;
+            liveTier = 'standard';
+          }
 
           if (activeEntitlement) {
             const expiresDate = activeEntitlement.expires_date;
@@ -207,8 +220,21 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
         const standardEntitlement = rcData?.subscriber?.entitlements?.adfree_access;
         const vipEntitlement = rcData?.subscriber?.entitlements?.vip_verified_access;
         
-        const activeEntitlement = vipEntitlement || standardEntitlement;
-        const tier = vipEntitlement ? 'vip' : 'standard';
+        // Select the entitlement that is actually active in the future
+        let activeEntitlement = null;
+        let tier = 'standard';
+
+        const nowMs = Date.now();
+        const isVipActive = vipEntitlement && vipEntitlement.expires_date && (new Date(vipEntitlement.expires_date).getTime() > nowMs);
+        const isStandardActive = standardEntitlement && standardEntitlement.expires_date && (new Date(standardEntitlement.expires_date).getTime() > nowMs);
+
+        if (isVipActive) {
+          activeEntitlement = vipEntitlement;
+          tier = 'vip';
+        } else if (isStandardActive) {
+          activeEntitlement = standardEntitlement;
+          tier = 'standard';
+        }
 
         // Check if the entitlement exists and its expiration date is in the future
         if (activeEntitlement) {
