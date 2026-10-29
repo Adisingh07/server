@@ -148,10 +148,15 @@ async function sendPushNotification(userId: string, title: string, body: string,
 
         const data = doc.data();
         const fcmTokenField = data?.fcmToken;
-        const tokens: string[] = Array.isArray(fcmTokenField) 
+        const rawTokens: string[] = Array.isArray(fcmTokenField) 
             ? fcmTokenField 
             : (fcmTokenField ? [fcmTokenField] : []);
             
+        // Deduplicate and filter empty tokens to prevent duplicate deliveries
+        const tokens: string[] = Array.from(new Set(rawTokens)).filter(
+            (t): t is string => typeof t === 'string' && t.trim().length > 0
+        );
+
         if (tokens.length === 0) return;
 
         // --- Sound & Vibration Rules ---
@@ -164,6 +169,9 @@ async function sendPushNotification(userId: string, title: string, body: string,
             vibrateTimings = [0, 500, 500, 500]; // Sound + Vibration
         }
 
+        // Collapse tag to prevent multiple notification popups for the same event on Android/APNs
+        const collapseTag = extraData?.postId ? `${type || 'general'}_${extraData.postId}` : (type || 'general');
+
         const message = {
             notification: {
                 title,
@@ -175,6 +183,7 @@ async function sendPushNotification(userId: string, title: string, body: string,
                 type: type || 'general',
                 avatar: avatar || '',
                 image: image || '',
+                tag: collapseTag,
                 ...extraData
             },
             android: {
@@ -183,9 +192,13 @@ async function sendPushNotification(userId: string, title: string, body: string,
                     vibrateTimingsMillis: vibrateTimings,
                     priority: (type === 'reply' || type === 'message_request') ? 'high' : 'default' as any,
                     imageUrl: image || undefined,
+                    tag: collapseTag,
                 },
             },
             apns: {
+                headers: {
+                    'apns-collapse-id': collapseTag,
+                },
                 payload: {
                     aps: {
                         sound,
@@ -204,7 +217,7 @@ async function sendPushNotification(userId: string, title: string, body: string,
         // --- Cleanup Invalid Tokens ---
         if (response.failureCount > 0) {
             const tokensToRemove: string[] = [];
-            response.responses.forEach((resp, idx) => {
+            response.responses.forEach((resp: any, idx: number) => {
                 if (!resp.success && resp.error) {
                     const errorCode = resp.error.code;
                     if (errorCode === 'messaging/registration-token-not-registered' || 
@@ -235,8 +248,15 @@ async function sendExpoPushNotification(userId: string, title: string, body: str
         const doc = await docRef.get();
         if (!doc.exists) return;
 
-        const tokens = doc.data()?.customPushToken || [];
+        const rawTokens = doc.data()?.customPushToken || [];
+        // Deduplicate and filter empty tokens to prevent duplicate deliveries
+        const tokens: string[] = Array.from(new Set(rawTokens)).filter(
+            (t): t is string => typeof t === 'string' && t.trim().length > 0
+        );
+
         if (tokens.length === 0) return;
+
+        const collapseId = data?.type ? `${data.type}_${userId}` : `follow_${userId}`;
 
         const messages = tokens.map((token: string) => ({
             to: token,
@@ -245,9 +265,10 @@ async function sendExpoPushNotification(userId: string, title: string, body: str
             data: { ...data, avatar },
             sound: 'default',
             channelId: 'urgent',
+            _id: collapseId, // Expo collapses duplicate notifications with same _id
         }));
 
-        await fetch('https://exp.host/--/api/v2/push/send', {
+        const response = await fetch('https://exp.host/--/api/v2/push/send', {
             method: 'POST',
             headers: {
                 'Accept': 'application/json',
@@ -256,6 +277,29 @@ async function sendExpoPushNotification(userId: string, title: string, body: str
             },
             body: JSON.stringify(messages),
         });
+
+        const result = await response.json();
+
+        // --- Cleanup Invalid Tokens for Expo ---
+        if (result.data) {
+            const tokensToRemove: string[] = [];
+            result.data.forEach((item: any, index: number) => {
+                if (item.status === 'error' && (
+                    item.details?.error === 'DeviceNotRegistered' || 
+                    item.details?.error === 'InvalidCredentials'
+                )) {
+                    tokensToRemove.push(tokens[index]);
+                }
+            });
+
+            if (tokensToRemove.length > 0) {
+                console.log(`Removing ${tokensToRemove.length} inactive Expo tokens for user ${userId}`);
+                await docRef.update({
+                    customPushToken: FieldValue.arrayRemove(...tokensToRemove)
+                });
+            }
+        }
+
         console.log(`🚀 Expo Push sent to ${userId}: "${title}"`);
     } catch (error) {
         console.error("Expo Push Error:", error);
@@ -429,11 +473,22 @@ const AGGREGATABLE_TYPES = ['like', 'comment', 'follow', 'reply', 'mention'];
 const AGGREGATION_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_ACTORS_IN_ARRAY = 5; // Keep latest 5 actors, rest tracked via actorCount
 
+// --- Milestone Push Constants ---
+// Only trigger push notifications for posts when they hit these milestone counts
+const LIKE_MILESTONES = new Set([1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 10000]);
+
 // --- Like/Follow Push Debounce ---
-const ACTION_NOTIFICATION_DEBOUNCE_MS = 5000; // 5 second window
+const ACTION_NOTIFICATION_DEBOUNCE_MS = 6000; // 6 second window
+
+interface LikedPostEntry {
+    postId: string;
+    postContent?: string;
+    milestone?: number;
+}
+
 const pendingActionNotifications = new Map<string, {
     timer: NodeJS.Timeout;
-    count: number;
+    actorIds: Set<string>;
     latestActorName: string;
     latestActorUsername?: string;
     latestActorAvatar?: string;
@@ -441,6 +496,7 @@ const pendingActionNotifications = new Map<string, {
     type: string;
     postContent?: string;
     postId?: string;
+    likedPosts?: LikedPostEntry[];
 }>();
 
 async function fireActionPushNotification(key: string) {
@@ -448,38 +504,78 @@ async function fireActionPushNotification(key: string) {
     if (!pending) return;
     pendingActionNotifications.delete(key);
 
-    const { recipientId, type, latestActorName, latestActorUsername, latestActorAvatar, count, postContent, postId } = pending;
+    const { recipientId, type, latestActorName, latestActorUsername, latestActorAvatar, actorIds, postContent, postId, likedPosts } = pending;
 
+    const count = actorIds.size;
     let title = '';
     let body = '';
-    let url = `${process.env.NEXT_PUBLIC_BASE_URL}/notifications`;
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://connectpi.in';
+    let url = `${baseUrl}/notifications`;
 
     const othersText = count > 1 ? ` and ${count - 1} other${count > 2 ? 's' : ''}` : '';
 
     switch (type) {
-        case 'like':
-            title = `${latestActorName}${othersText} liked your post`;
-            body = postContent ? `"${postContent.substring(0, 50)}..."` : '';
-            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+        case 'like': {
+            const posts = likedPosts || (postId ? [{ postId, postContent, milestone: 1 }] : []);
+            if (posts.length > 1) {
+                // Multi-post like burst by same actor collapsed into one clean notification
+                title = `${latestActorName} liked ${posts.length} of your posts ❤️`;
+                body = 'Tap to see your notifications.';
+                url = `${baseUrl}/notifications`;
+            } else if (posts.length === 1) {
+                const item = posts[0];
+                const milestone = item.milestone || 1;
+                const snippet = item.postContent ? `"${item.postContent.substring(0, 50)}${item.postContent.length > 50 ? '...' : ''}"` : '';
+
+                if (milestone === 1) {
+                    title = `${latestActorName}${othersText} liked your post`;
+                    body = snippet || 'Tap to view the post.';
+                } else if (milestone === 5) {
+                    title = 'Your post reached 5 likes! 🎉';
+                    body = snippet || 'People are enjoying your post!';
+                } else if (milestone === 10) {
+                    title = 'Your post reached 10 likes! 🔥';
+                    body = snippet || 'Your post is getting popular!';
+                } else if (milestone === 25) {
+                    title = '25 Likes! Your post is gaining momentum 🚀';
+                    body = snippet || 'Check out the reactions!';
+                } else if (milestone === 50) {
+                    title = '50 Likes! Your post is on fire! 🔥';
+                    body = snippet || 'Great job on your post!';
+                } else if (milestone === 100) {
+                    title = '100 Likes! Century reached on your post! 💯';
+                    body = snippet || 'Your post is a huge hit!';
+                } else {
+                    title = `${milestone} Likes! Your post is trending! 🌟`;
+                    body = snippet || 'Tap to view the post.';
+                }
+                if (item.postId) url = `${baseUrl}/post/${item.postId}`;
+            } else {
+                title = `${latestActorName}${othersText} liked your post`;
+                body = postContent ? `"${postContent.substring(0, 50)}..."` : '';
+                if (postId) url = `${baseUrl}/post/${postId}`;
+            }
             break;
+        }
         case 'follow':
             title = `${latestActorName}${othersText} started following you`;
             body = 'Check out your new followers!';
+            url = latestActorUsername ? `${baseUrl}/profile/${latestActorUsername}` : `${baseUrl}/notifications`;
             break;
         case 'comment':
             title = `${latestActorName}${othersText} commented on your post`;
             body = postContent ? `"${postContent.substring(0, 50)}..."` : '';
-            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            if (postId) url = `${baseUrl}/post/${postId}`;
             break;
         case 'reply':
             title = `${latestActorName}${othersText} replied to your comment`;
             body = 'Tap to view the reply.';
-            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            if (postId) url = `${baseUrl}/post/${postId}`;
             break;
         case 'mention':
             title = `${latestActorName}${othersText} mentioned you`;
             body = 'You were mentioned in a post.';
-            if (postId) url = `${process.env.NEXT_PUBLIC_BASE_URL}/post/${postId}`;
+            if (postId) url = `${baseUrl}/post/${postId}`;
             break;
         default:
             return;
@@ -490,27 +586,88 @@ async function fireActionPushNotification(key: string) {
         await sendExpoPushNotification(recipientId, title, body, { url, type, username: latestActorUsername }, latestActorAvatar);
     } else {
         // Use FCM for others (Like, Comment, etc.)
-        await sendPushNotification(recipientId, title, body, url, type, latestActorAvatar, undefined, { postId });
+        const targetPostId = (likedPosts && likedPosts.length === 1) ? likedPosts[0].postId : postId;
+        await sendPushNotification(recipientId, title, body, url, type, latestActorAvatar, undefined, { postId: targetPostId });
     }
-    console.log(`📨 Action push sent to ${recipientId}: "${title}" (${count} action${count > 1 ? 's' : ''} collapsed)`);
+    console.log(`📨 Action push sent to ${recipientId}: "${title}" (${count} unique actor${count > 1 ? 's' : ''} collapsed)`);
 }
 
-function scheduleActionPush(recipientId: string, type: string, actorName: string, actorUsername?: string, actorAvatar?: string, postContent?: string, postId?: string) {
-    const debounceKey = `${type}_${recipientId}_${postId || 'global'}`;
+async function scheduleActionPush(
+    recipientId: string,
+    type: string,
+    actorId: string,
+    actorName: string,
+    actorUsername?: string,
+    actorAvatar?: string,
+    postContent?: string,
+    postId?: string,
+    metadata?: any
+) {
+    let likeMilestone: number | undefined = undefined;
+
+    if (type === 'like') {
+        let likeCount = metadata?.likeCount;
+
+        // If likeCount was not provided, fetch from Firestore posts collection as fallback
+        if (typeof likeCount !== 'number' && postId) {
+            try {
+                const postSnap = await adminDb.collection('posts').doc(postId).get();
+                if (postSnap.exists) {
+                    const postData = postSnap.data();
+                    const likesArr = postData?.likes;
+                    likeCount = Array.isArray(likesArr) ? likesArr.length : 1;
+                }
+            } catch (err) {
+                console.warn(`[Push] Could not read post ${postId} likes count:`, err);
+            }
+        }
+
+        // Only send push if this like reached a designated milestone (1, 5, 10, 25, 50, 100...)
+        if (typeof likeCount === 'number') {
+            if (!LIKE_MILESTONES.has(likeCount)) {
+                console.log(`ℹ️ [Push] Skipped like push for recipient ${recipientId} on post ${postId} (likeCount ${likeCount} is not a milestone).`);
+                return;
+            }
+            likeMilestone = likeCount;
+        } else {
+            likeMilestone = 1;
+        }
+    }
+
+    // Debounce key:
+    // For likes: group by recipient and actor so rapid likes on multiple posts collapse into a single push
+    // For other types: group by type + recipient + post
+    const debounceKey = type === 'like'
+        ? `like_${recipientId}_${actorId}`
+        : `${type}_${recipientId}_${postId || 'global'}`;
+
     const existing = pendingActionNotifications.get(debounceKey);
 
     if (existing) {
         clearTimeout(existing.timer);
-        existing.count += 1;
+        existing.actorIds.add(actorId);
         existing.latestActorName = actorName;
         existing.latestActorUsername = actorUsername;
         existing.latestActorAvatar = actorAvatar;
+
+        if (type === 'like' && postId) {
+            if (!existing.likedPosts) {
+                existing.likedPosts = [];
+            }
+            const alreadyTracked = existing.likedPosts.some(p => p.postId === postId);
+            if (!alreadyTracked) {
+                existing.likedPosts.push({ postId, postContent, milestone: likeMilestone });
+            }
+            existing.postId = postId;
+            existing.postContent = postContent;
+        }
+
         existing.timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
     } else {
         const timer = setTimeout(() => fireActionPushNotification(debounceKey), ACTION_NOTIFICATION_DEBOUNCE_MS);
         pendingActionNotifications.set(debounceKey, {
             timer,
-            count: 1,
+            actorIds: new Set([actorId]),
             latestActorName: actorName,
             latestActorUsername: actorUsername,
             latestActorAvatar: actorAvatar,
@@ -518,6 +675,7 @@ function scheduleActionPush(recipientId: string, type: string, actorName: string
             type,
             postContent,
             postId,
+            likedPosts: type === 'like' && postId ? [{ postId, postContent, milestone: likeMilestone }] : undefined,
         });
     }
 }
@@ -607,14 +765,16 @@ async function createNotificationOnServer(notificationData: Omit<Notification, '
             }
 
             // Schedule debounced push notification for aggregatable types
-            scheduleActionPush(
+            await scheduleActionPush(
                 notificationData.recipientId,
                 notificationData.type,
+                notificationData.actor.id,
                 notificationData.actor.name,
                 notificationData.actor.username,
                 notificationData.actor.avatarUrl,
                 notificationData.post?.content,
-                notificationData.post?.id
+                notificationData.post?.id,
+                notificationData.metadata
             );
 
         } else {

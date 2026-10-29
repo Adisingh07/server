@@ -210,6 +210,7 @@ export type Notification = {
     amount?: number;
     reason?: string;
     tipMessage?: string;
+    likeCount?: number;
   };
   read: boolean;
   createdAt: Date;
