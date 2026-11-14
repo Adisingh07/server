@@ -1240,6 +1240,58 @@ app.post('/api/notifications/create', async (req, res) => {
     }
 });
 
+// --- PI IN-APP NOTIFICATIONS API (POST /v2/in_app_notifications/notify) ---
+app.post('/api/pi-notifications/notify', async (req: express.Request, res: express.Response) => {
+    try {
+        const { notifications, title, body, user_uid, subroute, apiKey } = req.body;
+        const keyToUse = apiKey || process.env.PI_API_KEY;
+
+        if (!keyToUse) {
+            return res.status(500).json({ error: 'Pi Server API Key is not configured on the server.' });
+        }
+
+        let notifList: any[] = [];
+        if (Array.isArray(notifications) && notifications.length > 0) {
+            notifList = notifications;
+        } else if (title && body && user_uid) {
+            notifList = [{
+                title: String(title).trim(),
+                body: String(body).trim(),
+                user_uid: String(user_uid).trim(),
+                subroute: subroute ? (String(subroute).startsWith('/') ? subroute : `/${subroute}`) : '/'
+            }];
+        } else {
+            return res.status(422).json({ error: 'Missing required parameters (title, body, user_uid, subroute or notifications array).' });
+        }
+
+        if (notifList.length > 256) {
+            return res.status(400).json({ error: 'Maximum 256 notifications allowed per request.' });
+        }
+
+        notifList = notifList.map(n => ({
+            ...n,
+            subroute: n.subroute ? (String(n.subroute).startsWith('/') ? n.subroute : `/${n.subroute}`) : '/'
+        }));
+
+        const response = await fetch(`${PI_API_BASE}/v2/in_app_notifications/notify`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Key ${keyToUse}`
+            },
+            body: JSON.stringify({ notifications: notifList })
+        });
+
+        const status = response.status;
+        const data = await response.json().catch(() => ({}));
+
+        return res.status(status).json(data);
+    } catch (error: any) {
+        console.error('Pi notification send error in server:', error);
+        return res.status(500).json({ error: error?.message || 'Failed to send notification' });
+    }
+});
+
 
 app.get('/api/notifications/:userId', async (req: express.Request, res: express.Response) => {
     try {
