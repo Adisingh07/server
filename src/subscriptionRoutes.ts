@@ -5,6 +5,51 @@ import { adminDb } from './firebase-admin';
 export const subscriptionRouter = express.Router();
 
 /**
+ * Helper to update user authority across users_public and legacy users (dual-write for safety)
+ */
+async function updateUserAuthority(userId: string, isVip: boolean) {
+  const publicRef = adminDb.collection('users_public').doc(userId);
+  const legacyRef = adminDb.collection('users').doc(userId);
+
+  const [publicSnap, legacySnap] = await Promise.all([
+    publicRef.get().catch(() => null),
+    legacyRef.get().catch(() => null)
+  ]);
+
+  const exists = Boolean((publicSnap && publicSnap.exists) || (legacySnap && legacySnap.exists));
+  if (!exists) return;
+
+  const userData = (publicSnap && publicSnap.exists) ? publicSnap.data() : (legacySnap ? legacySnap.data() : null);
+
+  if (isVip) {
+    if (userData?.authority !== 'verified' || userData?.verifiedReson !== 'Verified by subscription') {
+      console.log(`[SubscriptionAPI] Setting authority to verified for VIP user ${userId}...`);
+      const payload = {
+        authority: 'verified',
+        verifiedReson: 'Verified by subscription'
+      };
+      const batch = adminDb.batch();
+      batch.set(publicRef, payload, { merge: true });
+      batch.set(legacyRef, payload, { merge: true });
+      await batch.commit();
+    }
+  } else {
+    // Only revert if their existing reason is 'Verified by subscription'
+    if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
+      console.log(`[SubscriptionAPI] Reverting authority for user ${userId} to standard...`);
+      const payload = {
+        authority: 'user',
+        verifiedReson: admin.firestore.FieldValue.delete()
+      };
+      const batch = adminDb.batch();
+      batch.set(publicRef, payload, { merge: true });
+      batch.set(legacyRef, payload, { merge: true });
+      await batch.commit();
+    }
+  }
+}
+
+/**
  * GET /api/subscriptions/:userId
  * 
  * Check if the user has an active app ad-free subscription.
@@ -38,29 +83,7 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
           // --- SELF-HEALING SYNC ---
           // Ensure user's primary account authority and verifiedReson fields are synced!
           try {
-            const userRef = adminDb.collection('users').doc(userId);
-            const userDoc = await userRef.get();
-            if (userDoc.exists) {
-              const userData = userDoc.data();
-              if (tier === 'vip') {
-                if (userData?.authority !== 'verified' || userData?.verifiedReson !== 'Verified by subscription') {
-                  console.log(`[SubscriptionAPI] Self-healing authority for VIP user ${userId}...`);
-                  await userRef.update({
-                    authority: 'verified',
-                    verifiedReson: 'Verified by subscription'
-                  });
-                }
-              } else {
-                // If tier is standard but they still have "verified" with "Verified by subscription", revert it
-                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                  console.log(`[SubscriptionAPI] Self-healing reverting authority for Standard user ${userId}...`);
-                  await userRef.update({
-                    authority: 'user',
-                    verifiedReson: admin.firestore.FieldValue.delete()
-                  });
-                }
-              }
-            }
+            await updateUserAuthority(userId, tier === 'vip');
           } catch (e) {
             console.error('[SubscriptionAPI] Self-healing user document sync failed:', e);
           }
@@ -77,18 +100,7 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
     // --- SELF-HEALING SYNC FOR EXPIRED VIP USERS ---
     // If expired/inactive, ensure authority is reverted ONLY if it was "Verified by subscription"
     try {
-      const userRef = adminDb.collection('users').doc(userId);
-      const userDoc = await userRef.get();
-      if (userDoc.exists) {
-        const userData = userDoc.data();
-        if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-          console.log(`[SubscriptionAPI] Reverting expired VIP user ${userId} to standard user...`);
-          await userRef.update({
-            authority: 'user',
-            verifiedReson: admin.firestore.FieldValue.delete()
-          });
-        }
-      }
+      await updateUserAuthority(userId, false);
     } catch (e) {
       console.error('[SubscriptionAPI] Error reverting expired VIP user authority:', e);
     }
@@ -142,25 +154,10 @@ subscriptionRouter.get('/:userId', async (req: express.Request, res: express.Res
                 lastSyncEvent: 'SELF_HEALING_GET'
               }, { merge: true });
 
-              const userRef = adminDb.collection('users').doc(userId);
-              const userDoc = await userRef.get();
-              const userData = userDoc.exists ? userDoc.data() : null;
-
-              if (userDoc.exists) {
-                if (liveTier === 'vip') {
-                  await userRef.update({
-                    authority: 'verified',
-                    verifiedReson: 'Verified by subscription'
-                  });
-                } else {
-                  // Revert ONLY if their existing reason is 'Verified by subscription'
-                  if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                    await userRef.update({
-                      authority: 'user',
-                      verifiedReson: admin.firestore.FieldValue.delete()
-                    });
-                  }
-                }
+              try {
+                await updateUserAuthority(userId, liveTier === 'vip');
+              } catch (e) {
+                console.error('[SubscriptionAPI] Self-healing user document sync failed:', e);
               }
 
               console.log(`[SubscriptionAPI] Self-healing successful! Restored active ${liveTier} status for user ${userId} until ${expiresDate}`);
@@ -240,42 +237,19 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
         if (activeEntitlement) {
           const expiresDate = activeEntitlement.expires_date;
           if (expiresDate && new Date(expiresDate).getTime() > Date.now()) {
-            const batch = adminDb.batch();
-            
             // 1. Update subscription doc
             const subRef = adminDb.collection('adfree_subscriptions').doc(userId);
-            batch.set(subRef, {
+            await subRef.set({
               userId,
               tier,
               adFreeActiveUntil: expiresDate,
               isActive: true,
               updatedAt: new Date().toISOString(),
               purchaseDetails: { packageId, transactionId }
-            });
+            }, { merge: true });
 
-            // 2. Update user doc (Strict Safety Check)
-            const userRef = adminDb.collection('users').doc(userId);
-            const userSnap = await userRef.get();
-            const userData = userSnap.exists ? userSnap.data() : null;
-
-            if (userSnap.exists) {
-              if (tier === 'vip') {
-                batch.update(userRef, { 
-                  authority: 'verified', 
-                  verifiedReson: 'Verified by subscription' 
-                });
-              } else {
-                // Revert ONLY if their existing reason is 'Verified by subscription'
-                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                  batch.update(userRef, { 
-                    authority: 'user', 
-                    verifiedReson: admin.firestore.FieldValue.delete() 
-                  });
-                }
-              }
-            }
-
-            await batch.commit();
+            // 2. Update user doc (Strict Safety Check across users_public & users)
+            await updateUserAuthority(userId, tier === 'vip');
 
             console.log(`[SubscriptionAPI] Securely verified and activated ${tier} subscription for ${userId} until ${expiresDate}`);
             return res.status(200).json({ success: true, tier, adFreeActiveUntil: expiresDate });
@@ -299,39 +273,17 @@ subscriptionRouter.post('/activate', async (req: express.Request, res: express.R
     const isVipPackage = packageId?.includes('verified') || packageId?.includes('vip');
     const tier = isVipPackage ? 'vip' : 'standard';
 
-    const batch = adminDb.batch();
     const subRef = adminDb.collection('adfree_subscriptions').doc(userId);
-    batch.set(subRef, {
+    await subRef.set({
       userId,
       tier,
       adFreeActiveUntil: expiryDateStr,
       isActive: true,
       updatedAt: new Date().toISOString(),
       purchaseDetails: { packageId, transactionId }
-    });
+    }, { merge: true });
 
-    const userRef = adminDb.collection('users').doc(userId);
-    const userSnap = await userRef.get();
-    const userData = userSnap.exists ? userSnap.data() : null;
-
-    if (userSnap.exists) {
-      if (tier === 'vip') {
-        batch.update(userRef, { 
-          authority: 'verified', 
-          verifiedReson: 'Verified by subscription' 
-        });
-      } else {
-        // Revert ONLY if their existing reason is 'Verified by subscription'
-        if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-          batch.update(userRef, { 
-            authority: 'user', 
-            verifiedReson: admin.firestore.FieldValue.delete() 
-          });
-        }
-      }
-    }
-
-    await batch.commit();
+    await updateUserAuthority(userId, tier === 'vip');
 
     return res.status(200).json({ 
       success: true, 
@@ -398,24 +350,7 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
 
           // Sync user authority in background safely (non-blocking)
           try {
-            const userRef = adminDb.collection('users').doc(app_user_id);
-            const userSnap = await userRef.get();
-            if (userSnap.exists) {
-              const userData = userSnap.data();
-              if (tier === 'vip') {
-                await userRef.update({
-                  authority: 'verified',
-                  verifiedReson: 'Verified by subscription'
-                });
-              } else {
-                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                  await userRef.update({
-                    authority: 'user',
-                    verifiedReson: admin.firestore.FieldValue.delete()
-                  });
-                }
-              }
-            }
+            await updateUserAuthority(app_user_id, tier === 'vip');
           } catch (e) {
             console.error('[SubscriptionAPI Webhook] TRANSFER user update error:', e);
           }
@@ -435,17 +370,7 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
             }, { merge: true });
 
             try {
-              const oldUserRef = adminDb.collection('users').doc(oldUserId);
-              const oldUserSnap = await oldUserRef.get();
-              if (oldUserSnap.exists) {
-                const oldUserData = oldUserSnap.data();
-                if (oldUserData?.authority === 'verified' && oldUserData?.verifiedReson === 'Verified by subscription') {
-                  await oldUserRef.update({
-                    authority: 'user',
-                    verifiedReson: admin.firestore.FieldValue.delete()
-                  });
-                }
-              }
+              await updateUserAuthority(oldUserId, false);
             } catch (e) {
               console.error('[SubscriptionAPI Webhook] TRANSFER old user update error:', e);
             }
@@ -471,24 +396,7 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
 
           // Sync user authority in background safely (non-blocking)
           try {
-            const userRef = adminDb.collection('users').doc(app_user_id);
-            const userSnap = await userRef.get();
-            if (userSnap.exists) {
-              const userData = userSnap.data();
-              if (tier === 'vip') {
-                await userRef.update({
-                  authority: 'verified',
-                  verifiedReson: 'Verified by subscription'
-                });
-              } else {
-                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                  await userRef.update({
-                    authority: 'user',
-                    verifiedReson: admin.firestore.FieldValue.delete()
-                  });
-                }
-              }
-            }
+            await updateUserAuthority(app_user_id, tier === 'vip');
           } catch (e) {
             console.error('[SubscriptionAPI Webhook] Webhook purchase sync error:', e);
           }
@@ -536,17 +444,7 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
 
           if (!isStillActive) {
             try {
-              const userRef = adminDb.collection('users').doc(app_user_id);
-              const userSnap = await userRef.get();
-              if (userSnap.exists) {
-                const userData = userSnap.data();
-                if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                  await userRef.update({
-                    authority: 'user',
-                    verifiedReson: admin.firestore.FieldValue.delete()
-                  });
-                }
-              }
+              await updateUserAuthority(app_user_id, false);
             } catch (e) {
               console.error('[SubscriptionAPI Webhook] Expired user revert error:', e);
             }
@@ -559,17 +457,7 @@ subscriptionRouter.post('/webhook', async (req: express.Request, res: express.Re
           }, { merge: true });
 
           try {
-            const userRef = adminDb.collection('users').doc(app_user_id);
-            const userSnap = await userRef.get();
-            if (userSnap.exists) {
-              const userData = userSnap.data();
-              if (userData?.authority === 'verified' && userData?.verifiedReson === 'Verified by subscription') {
-                await userRef.update({
-                  authority: 'user',
-                  verifiedReson: admin.firestore.FieldValue.delete()
-                });
-              }
-            }
+            await updateUserAuthority(app_user_id, false);
           } catch (e) {
             console.error('[SubscriptionAPI Webhook] Expired user revert error:', e);
           }

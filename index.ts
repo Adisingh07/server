@@ -115,7 +115,10 @@ app.get("/health", (req: express.Request, res: express.Response) => {
 
 async function getUserFromFirestore(userId: string): Promise<User | null> {
     try {
-        const doc = await adminDb.collection('users').doc(userId).get();
+        let doc = await adminDb.collection('users_public').doc(userId).get();
+        if (!doc.exists) {
+            doc = await adminDb.collection('users').doc(userId).get();
+        }
         if (doc.exists) {
             const data = doc.data();
             const premiumUntil = data?.premiumUntil ? new Date(data.premiumUntil) : null;
@@ -907,7 +910,7 @@ app.post("/complete-payment", async (req, res) => {
     console.log(`Completing payment ${paymentId} (tx: ${txid}) for user ${userId}`);
     try {
         // Step 1: Complete the payment with the Pi Platform
-        const completeResponse = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
+        const verifyRes = await fetch(`${PI_API_BASE}/v2/payments/${paymentId}/complete`, {
             method: "POST",
             headers: {
                 'Content-Type': 'application/json',
@@ -982,9 +985,14 @@ app.post("/payments/complete", async (req, res) => {
 
         const paymentData = await completeResponse.json();
 
-        // Step 2: Grant premium access in Firestore
+        // Step 2: Grant premium access in Firestore (dual-write users_public and legacy users)
+        const userPublicRef = adminDb.collection('users_public').doc(userId);
         const userRef = adminDb.collection('users').doc(userId);
-        const userDoc = await userRef.get();
+
+        let userDoc = await userPublicRef.get();
+        if (!userDoc.exists) {
+            userDoc = await userRef.get();
+        }
         if (!userDoc.exists) {
             throw new Error("User to grant premium to was not found.");
         }
@@ -998,10 +1006,15 @@ app.post("/payments/complete", async (req, res) => {
 
         const newPremiumUntil = new Date(currentPremiumUntil.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-        await userRef.update({
+        const updatePayload = {
             premium: true,
             premiumUntil: newPremiumUntil.toISOString()
-        });
+        };
+
+        const batch = adminDb.batch();
+        batch.set(userPublicRef, updatePayload, { merge: true });
+        batch.set(userRef, updatePayload, { merge: true });
+        await batch.commit();
 
         // Step 3: Store the payment details (DTO) in MongoDB for records
         const paymentDto: PaymentDto = {
@@ -1149,7 +1162,10 @@ app.post("/payments/complete-deposit", async (req, res) => {
         const amount = paymentData.amount;
 
         const walletRef = adminDb.collection('wallets').doc(userId);
-        const userDoc = await adminDb.collection('users').doc(userId).get();
+        let userDoc = await adminDb.collection('users_public').doc(userId).get();
+        if (!userDoc.exists) {
+            userDoc = await adminDb.collection('users').doc(userId).get();
+        }
         if (!userDoc.exists) throw new Error(`User ${userId} not found.`);
         const username = userDoc.data()?.username;
 
@@ -1609,7 +1625,7 @@ io.on('connection', (socket) => {
 
                 if (updateResult) {
                     io.to(conversationId).emit('receiveMessage', insertedMessage);
-                    updateResult.participantIds.forEach(id => {
+                    updateResult.participantIds.forEach((id: string) => {
                         io.to(id).emit('updateConversation', updateResult);
                         // Send push notification to the other user
                         if (id !== senderId) {
@@ -1781,7 +1797,7 @@ io.on('connection', (socket) => {
 
                 const updatedConversation = await db.collection('conversations').findOne({ _id: new ObjectId(message.conversationId) });
                 if (updatedConversation) {
-                    updatedConversation.participantIds.forEach(id => {
+                    updatedConversation.participantIds.forEach((id: string) => {
                         io.to(id).emit('updateConversation', updatedConversation);
                     });
                 }
