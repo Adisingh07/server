@@ -4,6 +4,7 @@ export type User = {
   id: string;
   username: string;
   name: string;
+  displayName?: string;
   /** @unique The user's email address. Must be unique across all users. */
   email?: string;
   dob?: string; // Date of Birth
@@ -11,6 +12,7 @@ export type User = {
   password?: string;
   walletPin?: string;
   avatarUrl?: string;
+  photoURL?: string;
   bannerUrl?: string;
   bio?: string;
   links: string[];

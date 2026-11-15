@@ -123,12 +123,16 @@ async function getUserFromFirestore(userId: string): Promise<User | null> {
             const data = doc.data();
             const premiumUntil = data?.premiumUntil ? new Date(data.premiumUntil) : null;
             const daysLeft = premiumUntil ? Math.max(0, Math.ceil((premiumUntil.getTime() - Date.now()) / (1000 * 60 * 60 * 24))) : 0;
+            const resolvedName = data?.name || data?.displayName || data?.username || 'Unknown User';
+            const resolvedAvatar = data?.avatarUrl || data?.photoURL || undefined;
 
             return {
                 id: doc.id,
                 username: data?.username || 'unknown_user',
-                name: data?.name || 'Unknown User',
-                avatarUrl: data?.avatarUrl,
+                name: resolvedName,
+                displayName: data?.displayName || resolvedName,
+                avatarUrl: resolvedAvatar,
+                photoURL: data?.photoURL || resolvedAvatar,
                 premium: daysLeft > 0,
                 premiumDaysLeft: daysLeft,
                 links: data?.links || [],
